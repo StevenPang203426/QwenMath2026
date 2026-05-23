@@ -1,0 +1,39 @@
+# ============================================================
+# grpo.yaml — 方案4：GRPO（组相对策略优化）
+# DeepSeek-R1 风格的强化学习训练
+# ============================================================
+inherit: base
+
+data:
+  train_path: "data/raw/train.json"      # GRPO 用原始数据，奖励函数在线计算
+
+model:
+  sft_checkpoint: "outputs/checkpoints/sft_cot/best"
+
+grpo:
+  num_generations: 4                     # 每个 prompt 采样响应数（显存友好）
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.95
+  max_prompt_length: 256
+  max_completion_length: 512
+
+reward:
+  format_weight: 0.2                     # 格式奖励权重
+  correctness_weight: 1.0                # 正确性奖励权重
+  format_pattern: '<think>.*?</think>\s*<answer>.*?</answer>'
+
+training:
+  output_dir: "outputs/checkpoints/grpo"
+  num_train_epochs: 1
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-5
+  warmup_ratio: 0.1
+  lr_scheduler_type: "cosine"
+  save_steps: 200
+  eval_steps: 200
+
+logging:
+  run_name: "grpo"
+  tags: ["grpo", "rl", "deepseek-r1"]

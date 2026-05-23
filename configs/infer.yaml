@@ -1,0 +1,49 @@
+# ============================================================
+# infer.yaml — 推理配置
+# 统一管理各方案的推理参数
+# ============================================================
+
+# 推理目标方案（切换此字段即可切换推理模型）
+active_method: "sft_cot"                 # baseline | cot_prompt | sft_cot | dpo | grpo
+
+# 各方案的模型路径
+methods:
+  baseline:
+    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    adapter_path: "outputs/checkpoints/baseline/best"
+    use_cot: false
+  cot_prompt:
+    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    adapter_path: null                   # 不微调，纯提示工程
+    use_cot: true
+    cot_strategy: "few_shot"             # zero_shot | few_shot
+  sft_cot:
+    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    adapter_path: "outputs/checkpoints/sft_cot/best"
+    use_cot: true
+  dpo:
+    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    adapter_path: "outputs/checkpoints/dpo/best"
+    use_cot: true
+  grpo:
+    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    adapter_path: "outputs/checkpoints/grpo/best"
+    use_cot: true
+
+# 生成参数
+generation:
+  max_new_tokens: 512
+  temperature: 0.1
+  top_p: 0.9
+  do_sample: false
+  num_beams: 1
+
+# 输出
+output:
+  dir: "outputs/submissions"
+  filename_template: "submit_{method}.csv"
+
+# 批量推理
+batch:
+  batch_size: 16
+  num_workers: 4

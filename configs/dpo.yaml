@@ -1,0 +1,33 @@
+# ============================================================
+# dpo.yaml — 方案3：DPO（直接偏好优化）
+# 在 SFT-CoT checkpoint 基础上进行偏好对齐
+# ============================================================
+inherit: base
+
+data:
+  train_path: "data/processed/train_dpo.json"
+
+model:
+  sft_checkpoint: "outputs/checkpoints/sft_cot/best"
+
+dpo:
+  beta: 0.1
+  loss_type: "sigmoid"
+  label_smoothing: 0.0
+  max_prompt_length: 256
+  max_length: 768
+
+training:
+  output_dir: "outputs/checkpoints/dpo"
+  num_train_epochs: 2
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 5.0e-5
+  warmup_ratio: 0.1
+  lr_scheduler_type: "cosine"
+  save_steps: 200
+  eval_steps: 200
+
+logging:
+  run_name: "dpo"
+  tags: ["dpo", "preference", "alignment"]

@@ -1,0 +1,25 @@
+# ============================================================
+# sft_cot.yaml — 方案2：CoT SFT（带推理步骤的监督微调）
+# ============================================================
+inherit: base
+
+data:
+  train_path: "data/processed/train_cot.json"
+  max_length: 768                        # CoT 推理过程需要更长上下文
+
+training:
+  output_dir: "outputs/checkpoints/sft_cot"
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  save_strategy: "steps"
+  save_steps: 500
+  eval_strategy: "steps"
+  eval_steps: 500
+
+logging:
+  run_name: "sft-cot"
+  tags: ["sft", "cot", "deepseek-data"]

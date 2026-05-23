@@ -1,0 +1,71 @@
+# ============================================================
+# base.yaml — 所有方案共享的基础配置
+# 其他配置文件通过 inherit: base 继承此文件
+# ============================================================
+
+# 模型配置
+model:
+  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  cache_dir: "./model_cache"
+  torch_dtype: "bfloat16"
+
+# 数据配置
+data:
+  train_path: "data/raw/train.json"
+  test_path: "data/raw/test.json"
+  val_ratio: 0.1                         # 从训练集中划出 10% 作验证集
+  max_length: 512
+
+# LoRA 配置
+lora:
+  r: 8
+  lora_alpha: 32
+  lora_dropout: 0.1
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+# 通用训练配置
+training:
+  seed: 42
+  bf16: true
+  gradient_checkpointing: true
+  output_dir: "outputs/checkpoints/default"
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-4
+  warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  save_strategy: "steps"
+  save_steps: 500
+  eval_strategy: "steps"
+  eval_steps: 500
+  logging_steps: 10
+  save_total_limit: 3
+
+# 日志配置
+logging:
+  tool: "wandb"
+  project: "math-solver"
+  log_steps: 10
+
+# 答案提取配置
+answer_extraction:
+  method: "regex"
+  patterns:
+    - '<answer>(.*?)</answer>'
+    - '答案[是为：:]\s*(-?\d+\.?\d*)'
+    - '(-?\d+\.?\d*)\s*$'
+
+# 推理配置
+generation:
+  max_new_tokens: 512
+  temperature: 0.1
+  top_p: 0.9
+  do_sample: false
