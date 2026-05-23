@@ -4,7 +4,7 @@
 # ============================================================
 
 # 推理目标方案（切换此字段即可切换推理模型）
-active_method: "sft_cot"                 # baseline | cot_prompt | sft_cot | dpo | grpo
+active_method: "baseline"
 
 # 各方案的模型路径
 methods:
