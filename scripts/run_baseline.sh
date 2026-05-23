@@ -21,9 +21,9 @@ python -m src.data.preprocessor \
 echo "[2/3] 开始 Baseline SFT 训练..."
 python -m src.training.sft_trainer --config configs/sft_baseline.yaml
 
-# 3. 推理
+# 3. 推理（指定 baseline 方案）
 echo "[3/3] 推理生成 submit.csv..."
-python -m src.inference.batch_infer --config configs/infer.yaml
+bash scripts/run_infer.sh baseline
 
 echo "=============================="
 echo " Baseline 完成！"
