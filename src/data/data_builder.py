@@ -1,6 +1,6 @@
 """
 CoT 数据构建模块
-调用 DeepSeek V4 API 为训练数据生成带推理步骤的答案
+调用 DeepSeek V4 API（OpenAI SDK 兼容格式）为训练数据生成带推理步骤的答案
 同时生成错误推理路径供 DPO 使用
 """
 import json
@@ -15,15 +15,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 logger = logging.getLogger("math_solver.data_builder")
 
 # DeepSeek API 配置
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-v4-pro"  # deepseek-v4-pro | deepseek-v4-flash
+
+
+def _get_client(api_key: str):
+    """获取 OpenAI 兼容客户端（复用连接）"""
+    from openai import OpenAI
+    return OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
 
 
 def _call_deepseek_api(
     question: str,
     api_key: str,
-    model: str = "deepseek-chat",
+    model: str = DEFAULT_MODEL,
     generate_wrong: bool = False,
     max_retries: int = 3,
+    client=None,
 ) -> Optional[dict]:
     """
     调用 DeepSeek API 生成 CoT 推理
@@ -31,14 +39,16 @@ def _call_deepseek_api(
     Args:
         question: 数学题目
         api_key: API 密钥
-        model: 模型名称
+        model: 模型名称 (deepseek-v4-pro / deepseek-v4-flash)
         generate_wrong: 是否生成错误推理路径
         max_retries: 最大重试次数
+        client: 复用的 OpenAI 客户端
 
     Returns:
         {"cot": "推理过程", "answer": "答案"} 或 None
     """
-    import requests
+    if client is None:
+        client = _get_client(api_key)
 
     if generate_wrong:
         system_prompt = (
@@ -62,23 +72,14 @@ def _call_deepseek_api(
 
     for attempt in range(max_retries):
         try:
-            response = requests.post(
-                DEEPSEEK_API_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": 0.3 if not generate_wrong else 0.8,
-                    "max_tokens": 1024,
-                },
-                timeout=60,
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.3 if not generate_wrong else 0.8,
+                max_tokens=1024,
+                stream=False,
             )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-
+            content = response.choices[0].message.content
             return _parse_response(content)
 
         except Exception as e:
@@ -159,12 +160,16 @@ def build_cot_dataset(
     todo = [item for item in data if item["id"] not in results]
     logger.info(f"待处理: {len(todo)} 条，已完成: {len(results)} 条")
 
+    # 创建共享客户端（复用连接池）
+    client = _get_client(api_key)
+
     def process_item(item):
         result = _call_deepseek_api(
             question=item["question"],
             api_key=api_key,
             model=model,
             generate_wrong=False,
+            client=client,
         )
         if result is None:
             return None
@@ -186,6 +191,7 @@ def build_cot_dataset(
                 api_key=api_key,
                 model=model,
                 generate_wrong=True,
+                client=client,
             )
             if wrong_result:
                 output_item["wrong_cot"] = wrong_result["cot"]
@@ -234,7 +240,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", default="data/raw/train.json")
     parser.add_argument("--output", default="data/processed/train_cot.json")
     parser.add_argument("--api_key", required=True)
-    parser.add_argument("--model", default="deepseek-chat")
+    parser.add_argument("--model", default="deepseek-v4-pro")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--generate_wrong", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
