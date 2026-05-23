@@ -6,6 +6,18 @@ import json
 from typing import Optional
 
 
+def _values_equal(a: Optional[str], b: Optional[str], tol: float = 1e-6) -> bool:
+    """数值容差比较，处理浮点精度问题（如 0.6 vs 3/5）"""
+    if a is None or b is None:
+        return False
+    if a == b:
+        return True
+    try:
+        return abs(float(a) - float(b)) < tol
+    except (ValueError, TypeError):
+        return False
+
+
 def normalize_number(text: str) -> Optional[str]:
     """
     标准化数字字符串，处理各种格式
@@ -75,9 +87,7 @@ def compute_accuracy(
         pred_norm = normalize_number(str(pred))
         ref_norm = normalize_number(str(ref))
 
-        is_correct = (pred_norm is not None and
-                      ref_norm is not None and
-                      pred_norm == ref_norm)
+        is_correct = _values_equal(pred_norm, ref_norm)
 
         if is_correct:
             correct += 1

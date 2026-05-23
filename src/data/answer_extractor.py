@@ -6,16 +6,19 @@ import re
 from typing import Optional
 
 
+# 数字模式：支持整数、小数、分数（如 3/5、-1/2）
+_NUM = r'-?\d+\.?\d*(?:/\d+\.?\d*)?'
+
 # 默认提取规则（按优先级排列）
 DEFAULT_PATTERNS = [
     # Level 1: <answer> 标签
     (r'<answer>\s*(.*?)\s*</answer>', "标签匹配"),
-    # Level 2: 中文关键词（"答案是/为/：" 后的数字）
-    (r'答案[是为：:]\s*(-?\d+\.?\d*)', "关键词匹配"),
+    # Level 2: 中文关键词（"答案是/为/：" 后的数字或分数）
+    (rf'答案[是为：:]\s*({_NUM})', "关键词匹配"),
     # Level 3: "= 数字" 格式
-    (r'[=＝]\s*(-?\d+\.?\d*)\s*(?:[。.\s]|$)', "等号匹配"),
-    # Level 4: 最后一个数字（含小数、负数）
-    (r'(-?\d+\.?\d*)', "末尾数字"),
+    (rf'[=＝]\s*({_NUM})\s*(?:[。.\s]|$)', "等号匹配"),
+    # Level 4: 最后一个数字或分数（含小数、负数）
+    (rf'({_NUM})', "末尾数字"),
 ]
 
 
@@ -95,6 +98,12 @@ def _clean_answer(text: str) -> str:
         text = text.replace(unit, "")
 
     text = text.strip()
+
+    # 分数格式保留原样（如 3/5、-1/2）
+    if '/' in text:
+        frac_match = re.match(r'^-?\d+\.?\d*/\d+\.?\d*$', text)
+        if frac_match:
+            return text
 
     # 标准化数字格式
     try:

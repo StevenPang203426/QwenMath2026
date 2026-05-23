@@ -89,14 +89,62 @@ def _call_deepseek_api(
     return None
 
 
+def _normalize_answer(answer_str: str) -> float | None:
+    """
+    将答案字符串统一转为 float，支持分数（3/5）、小数（0.6）、整数（42）
+
+    Returns:
+        float 值，解析失败返回 None
+    """
+    if not answer_str:
+        return None
+    s = answer_str.strip()
+    try:
+        # 分数格式：3/5、-1/3
+        if '/' in s:
+            parts = s.split('/')
+            if len(parts) == 2:
+                num, den = float(parts[0]), float(parts[1])
+                if den == 0:
+                    return None
+                return num / den
+        return float(s)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _answers_match(api_answer: str, ground_truth: str, tol: float = 1e-6) -> bool:
+    """
+    判断两个答案是否等价，支持：
+    - 整数/小数直接比较：  "42" == "42.0"
+    - 分数与小数等价：    "3/5" == "0.6"
+    - 分数与分数等价：    "1/5" == "2/10"
+    - 字符串完全匹配兜底： "3/5" == "3/5"
+    """
+    # 先尝试字符串精确匹配
+    if str(api_answer).strip() == str(ground_truth).strip():
+        return True
+
+    # 数值等价比较
+    val_api = _normalize_answer(str(api_answer))
+    val_gt = _normalize_answer(str(ground_truth))
+    if val_api is not None and val_gt is not None:
+        return abs(val_api - val_gt) < tol
+
+    return False
+
+
 def _parse_response(content: str) -> dict:
-    """解析 API 返回的文本，提取推理过程和答案"""
+    """解析 API 返回的文本，提取推理过程和答案（支持整数、小数、分数）"""
     cot = ""
     answer = ""
 
+    # 答案正则：支持 整数、小数、分数（如 3/5、-1/2）
+    _NUM_PATTERN = r'-?\d+\.?\d*(?:/\d+\.?\d*)?'
+
     # 尝试匹配格式
     cot_match = re.search(r'推理过程[：:]\s*(.*?)(?=答案[：:])', content, re.DOTALL)
-    answer_match = re.search(r'答案[：:]\s*(-?\d+\.?\d*)', content)
+    answer_match = re.search(rf'答案[：:]\s*({_NUM_PATTERN})', content)
 
     if cot_match:
         cot = cot_match.group(1).strip()
@@ -110,8 +158,8 @@ def _parse_response(content: str) -> dict:
     if answer_match:
         answer = answer_match.group(1).strip()
     else:
-        # 回退：取最后一个数字
-        nums = re.findall(r'-?\d+\.?\d*', content)
+        # 回退：取最后一个数字（含分数）
+        nums = re.findall(_NUM_PATTERN, content)
         answer = nums[-1] if nums else ""
 
     return {"cot": cot, "answer": answer}
@@ -181,7 +229,7 @@ def build_cot_dataset(
             "answer": item["answer"],
             "cot": result["cot"],
             "api_answer": result["answer"],
-            "answer_match": str(result["answer"]) == str(item["answer"]),
+            "answer_match": _answers_match(result["answer"], item["answer"]),
         }
 
         # 可选：生成错误推理
