@@ -9,24 +9,24 @@ active_method: "sft_cot"                 # baseline | cot_prompt | sft_cot | dpo
 # 各方案的模型路径
 methods:
   baseline:
-    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    base_model: "/root/autodl-tmp/steven/Math/QwenMath2026/model_cache/Qwen/Qwen2.5-0.5B-Instruct"
     adapter_path: "outputs/checkpoints/baseline/best"
     use_cot: false
   cot_prompt:
-    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    base_model: "/root/autodl-tmp/steven/Math/QwenMath2026/model_cache/Qwen/Qwen2.5-0.5B-Instruct"
     adapter_path: null                   # 不微调，纯提示工程
     use_cot: true
     cot_strategy: "few_shot"             # zero_shot | few_shot
   sft_cot:
-    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    base_model: "/root/autodl-tmp/steven/Math/QwenMath2026/model_cache/Qwen/Qwen2.5-0.5B-Instruct"
     adapter_path: "outputs/checkpoints/sft_cot/best"
     use_cot: true
   dpo:
-    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    base_model: "/root/autodl-tmp/steven/Math/QwenMath2026/model_cache/Qwen/Qwen2.5-0.5B-Instruct"
     adapter_path: "outputs/checkpoints/dpo/best"
     use_cot: true
   grpo:
-    base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+    base_model: "/root/autodl-tmp/steven/Math/QwenMath2026/model_cache/Qwen/Qwen2.5-0.5B-Instruct"
     adapter_path: "outputs/checkpoints/grpo/best"
     use_cot: true
 

@@ -5,7 +5,7 @@
 
 # 模型配置
 model:
-  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  name: "/root/autodl-tmp/steven/Math/QwenMath2026/model_cache/Qwen/Qwen2.5-0.5B-Instruct"
   cache_dir: "./model_cache"
   torch_dtype: "bfloat16"
 
