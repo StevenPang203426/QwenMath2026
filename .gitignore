@@ -1,0 +1,56 @@
+# ============================================================
+# .gitignore — 小学数学应用题自动解题
+# ============================================================
+
+# 模型权重和 checkpoint
+outputs/checkpoints/
+model_cache/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# wandb 日志
+outputs/logs/
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# 环境
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 大文件（通过 README 说明获取方式）
+data/raw/*.json
+data/processed/train_cot_raw.json
+
+# 保留目录结构
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/splits/.gitkeep
+!outputs/checkpoints/.gitkeep
+!outputs/submissions/.gitkeep
+!outputs/logs/.gitkeep
