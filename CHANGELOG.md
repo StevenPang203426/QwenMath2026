@@ -5,6 +5,30 @@
 
 ---
 
+## [v0.1.2] - 2026-05-24 — 答案解析增强与 SCDPO 错误推理
+
+### Added（新增）
+- `_split_cot_steps()`: 将 CoT 推理拆分为步骤（支持标记/换行/句号三种策略）
+- `_generate_scdpo_wrong()`: SCDPO 风格错误推理生成，保留正确前半段+错误后半段
+- `_normalize_answer()`: 统一将分数/小数/百分数转为 float
+- `_answers_match()`: 答案等价比较（"3/5"=="0.6", "1/5"=="2/10"）
+- 两轮处理机制：第一轮正常生成，第二轮低温度自动重试失败项
+- 每条结果新增 `status` 字段（ok/api_failed/parse_error:xxx）
+- `docs/issues_and_solutions.md`: 问题与解决方案汇总文档
+
+### Changed（变更）
+- 数字正则扩展为 `-?\d+\.?\d*(?:/\d+\.?\d*)?%?`，支持分数和百分数
+- `answer_extractor.py` 的 `_clean_answer()` 保留分数和百分数原始形式
+- `metrics.py` 新增 `_values_equal()` 容差比较，替代字符串直接比较
+- system_prompt 新增"答案可以是整数、小数、分数或百分数"提示
+
+### Fixed（修复）
+- 修复 `_parse_response` 无法提取分数答案（如 "3/5" 只取到 "3"）
+- 修复空输出/解析失败导致整条数据丢失（现在标记状态保留）
+- 修复百分数答案被截断（"10%" 只取到 "10"）
+
+---
+
 ## [v0.1.1] - 2026-05-23 — 工具链切换与数据构建测试模式
 
 ### Changed（变更）

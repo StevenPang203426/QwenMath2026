@@ -38,7 +38,7 @@ python -m src.data.data_builder \
     --input data/raw/train.json \
     --output data/processed/train_cot_raw.json \
     --api_key "$DEEPSEEK_API_KEY" \
-    --model deepseek-v4-pro \
+    --model deepseek-v4-flash \
     --workers 4 \
     --generate_wrong \
     $LIMIT_FLAG

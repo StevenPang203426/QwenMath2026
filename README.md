@@ -72,20 +72,61 @@ bash scripts/run_infer.sh sft_cot   # 可选: baseline | cot_prompt | sft_cot | 
 bash scripts/run_all_experiments.sh
 ```
 
-### 数据构建测试
+### 数据构建
 
-首次调用 DeepSeek API 建议先小批量测试：
+调用 DeepSeek V4 Flash API 生成 CoT 推理数据，支持断点续传。
 
 ```bash
 export DEEPSEEK_API_KEY=your_key
-# 只处理前 20 条，验证 API 调用和数据格式是否正确
+
+# 小批量测试（默认 20 条，验证 API 调用和答案匹配率）
+bash scripts/run_data_build.sh          # 20 条
+bash scripts/run_data_build.sh 50       # 50 条
+bash scripts/run_data_build.sh all      # 全量 12000 条
+
+# 等价的 python 命令（更多参数控制）
 python -m src.data.data_builder \
     --input data/raw/train.json \
-    --output data/processed/train_cot_test.json \
+    --output data/processed/train_cot_raw.json \
     --api_key "$DEEPSEEK_API_KEY" \
-    --limit 20 \
-    --generate_wrong
+    --model deepseek-v4-flash \
+    --workers 4 \
+    --limit 20
 ```
+
+#### 生成错误推理（DPO 用）
+
+添加 `--generate_wrong` 即可同时生成错误推理路径，用于 DPO 偏好训练。
+错误推理有两种生成方式，通过 `--wrong_method` 选择：
+
+```bash
+# simple（默认）：以"粗心小学生"角色自然犯错，不额外增加 API 请求
+python -m src.data.data_builder \
+    --input data/raw/train.json \
+    --output data/processed/train_cot_raw.json \
+    --api_key "$DEEPSEEK_API_KEY" \
+    --generate_wrong \
+    --wrong_method simple
+
+# scdpo：Step-Controlled DPO，保留正确前半段 + 注入错误后半段
+# 可精确控制错误出现的步骤位置，但会多消耗 input token
+python -m src.data.data_builder \
+    --input data/raw/train.json \
+    --output data/processed/train_cot_raw.json \
+    --api_key "$DEEPSEEK_API_KEY" \
+    --generate_wrong \
+    --wrong_method scdpo
+```
+
+#### 主要参数说明
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--model` | `deepseek-v4-flash` | API 模型（也可用 `deepseek-v4-pro`） |
+| `--workers` | `4` | 并行线程数 |
+| `--limit` | `0`（全部） | 限制处理条数，用于测试 |
+| `--generate_wrong` | 关闭 | 同时生成错误推理（DPO 偏好对） |
+| `--wrong_method` | `simple` | 错误推理方式：`simple`（推荐）或 `scdpo` |
 
 ### 配置管理
 
