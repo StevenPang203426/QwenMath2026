@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 logger = logging.getLogger("math_solver.data_builder")
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_MODEL = "deepseek-v4-flash"  # deepseek-v4-pro | deepseek-v4-flash
 
 # 数字正则：整数、小数、分数(3/5)、百分数(10%)
 _NUM = r'-?\d+\.?\d*(?:/\d+\.?\d*)?%?'
