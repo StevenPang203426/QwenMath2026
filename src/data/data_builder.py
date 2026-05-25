@@ -121,7 +121,7 @@ def _call_api(
     """调用 API 生成推理"""
     prompt = _PROMPT_WRONG if generate_wrong else _PROMPT_CORRECT
     if temperature is None:
-        temperature = 0.8 if generate_wrong else 0.3
+        temperature = 1.2 if generate_wrong else 0.3
 
     messages = [
         {"role": "system", "content": prompt},
@@ -178,7 +178,12 @@ def build_cot_dataset(
 
     if limit > 0:
         data = data[:limit]
-        logger.info(f"小批量测试模式: 只处理前 {limit} 条数据")
+        # 小批量测试：输出到独立目录，关闭断点续传
+        test_dir = Path(output_path).parent / "test"
+        test_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(test_dir / f"test_{limit}.json")
+        resume = False
+        logger.info(f"小批量测试模式: {limit} 条, 输出到 {output_path}")
 
     # 断点续传
     results = {}
@@ -263,6 +268,7 @@ def build_cot_dataset(
 
     # ========== 第一轮 ==========
     completed, failed_items = 0, []
+    save_every = min(100, max(10, len(todo) // 5))  # 小批量时更频繁保存
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_item, item): item for item in todo}
         for future in as_completed(futures):
@@ -272,7 +278,7 @@ def build_cot_dataset(
                 completed += 1
                 if not result.get("answer_match") or result.get("status") != "ok":
                     failed_items.append(futures[future])
-                if completed % 100 == 0:
+                if completed % save_every == 0:
                     _save(results, output_path)
                     logger.info(f"[第1轮] 进度: {completed}/{len(todo)}")
 
@@ -298,7 +304,11 @@ def build_cot_dataset(
     total = len(results)
     mc = sum(1 for r in results.values() if r.get("answer_match"))
     ec = sum(1 for r in results.values() if r.get("status") != "ok")
+    wc = sum(1 for r in results.values() if r.get("wrong_cot"))
+    wf = mc - wc  # 匹配成功但未能生成错误推理的条目
     logger.info(f"完成: {total} 条, 匹配率: {mc}/{total} ({mc/total*100:.1f}%)")
+    if generate_wrong:
+        logger.info(f"错误推理: 成功 {wc} 条, 失败(模型算对) {wf} 条")
     if ec:
         logger.info(f"异常: {ec} 条")
 
