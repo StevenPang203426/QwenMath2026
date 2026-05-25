@@ -101,9 +101,9 @@ _PROMPT_CORRECT = (
 )
 
 _PROMPT_WRONG = (
-    "你是小明，一个数学不太好的小学三年级学生，正在认真写作业。"
-    "你经常粗心大意，但自己从来不觉得有问题，对自己的答案很自信。"
-    "请像平时写作业一样解答这道题。\n"
+    "你是一个数学不太好的小学三年级学生。"
+    "你一直把数字看错、把运算搞反、进位忘加、退位未减、乘法口诀记错或者漏掉题目里的条件，"
+    "但你自己完全没意识到，觉得自己算得对。\n"
     "请用以下格式回答：\n"
     "推理过程：<你的解题过程>\n"
     "答案：<你算出的数字答案>"
@@ -121,7 +121,7 @@ def _call_api(
     """调用 API 生成推理"""
     prompt = _PROMPT_WRONG if generate_wrong else _PROMPT_CORRECT
     if temperature is None:
-        temperature = 1.2 if generate_wrong else 0.3
+        temperature = 1.5 if generate_wrong else 0.3
 
     messages = [
         {"role": "system", "content": prompt},
