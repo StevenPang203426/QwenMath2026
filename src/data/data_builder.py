@@ -101,9 +101,21 @@ _PROMPT_CORRECT = (
 )
 
 _PROMPT_WRONG = (
-    "你是一个数学不太好的小学三年级学生。"
-    "你一直把数字看错、把运算搞反、进位忘加、退位未减、乘法口诀记错或者漏掉题目里的条件，"
-    "但你自己完全没意识到，觉得自己算得对。\n"
+    "你是一个数学学生，请尝试解答以下小学数学题，"
+    "但请故意在某个步骤中犯一个合理的计算错误，导致最终答案错误。"
+    "语气自然，不要用\"故意\"\"但是\"\"错误地\"等词。"
+    "请用以下格式回答：\n"
+    "推理过程：<你的错误推理过程>\n"
+    "答案：<错误的数字答案>"
+)
+
+# 兜底 prompt：当上面的 prompt 3 次都生成了正确答案时使用
+# 直接告知正确答案，强制要求不同
+_PROMPT_WRONG_HARD = (
+    "你是一个数学学生，请解答以下小学数学题，"
+    "但你必须在某个计算步骤中犯一个自然的错误，使最终答案与正确答案不同。"
+    "正确答案是 {correct_answer}，你的答案必须与之不同。"
+    "不要提及以上要求，语气自然自信。"
     "请用以下格式回答：\n"
     "推理过程：<你的解题过程>\n"
     "答案：<你算出的数字答案>"
@@ -117,14 +129,16 @@ def _call_api(
     generate_wrong: bool = False,
     temperature: float | None = None,
     max_retries: int = 3,
+    system_prompt: str | None = None,
 ) -> Optional[dict]:
     """调用 API 生成推理"""
-    prompt = _PROMPT_WRONG if generate_wrong else _PROMPT_CORRECT
+    if system_prompt is None:
+        system_prompt = _PROMPT_WRONG if generate_wrong else _PROMPT_CORRECT
     if temperature is None:
-        temperature = 1.5 if generate_wrong else 0.3
+        temperature = 0.8 if generate_wrong else 0.3
 
     messages = [
-        {"role": "system", "content": prompt},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": question},
     ]
 
@@ -238,6 +252,7 @@ def build_cot_dataset(
         # 生成错误推理（仅对正确匹配的条目）
         if generate_wrong and out["answer_match"]:
             wrong = None
+            wrong_status = "none"
 
             if scdpo_gen is not None:
                 wrong = scdpo_gen(
@@ -247,22 +262,40 @@ def build_cot_dataset(
                     client=client, model=model,
                     parse_fn=_parse_response, match_fn=_answers_match,
                 )
+                if (wrong and wrong.get("answer")
+                        and not _answers_match(wrong["answer"], str(item["answer"]))):
+                    wrong_status = "scdpo"
 
             # SCDPO 失败或使用 simple 方式，最多尝试 3 次
-            for _try in range(3):
-                if wrong is None or _answers_match(
-                        wrong.get("answer", ""), str(item["answer"])):
+            if wrong_status == "none":
+                for _try in range(3):
                     wrong = _call_api(item["question"], client, model,
                                       generate_wrong=True)
-                else:
-                    break
+                    if (wrong and wrong.get("answer")
+                            and not _answers_match(wrong["answer"], str(item["answer"]))):
+                        wrong_status = f"simple_try{_try + 1}"
+                        break
 
-            if (wrong and wrong.get("answer")
-                    and not _answers_match(wrong["answer"], str(item["answer"]))):
+            # 3 次都算对了 → 兜底：告知正确答案，强制不同（温度 0.7）
+            if wrong_status == "none":
+                hard_prompt = _PROMPT_WRONG_HARD.format(
+                    correct_answer=item["answer"])
+                wrong = _call_api(item["question"], client, model,
+                                  generate_wrong=True,
+                                  system_prompt=hard_prompt,
+                                  temperature=0.7)
+                if (wrong and wrong.get("answer")
+                        and not _answers_match(wrong["answer"], str(item["answer"]))):
+                    wrong_status = "hard_fallback"
+
+            if wrong_status != "none":
                 out["wrong_cot"] = wrong["cot"]
                 out["wrong_answer"] = wrong["answer"]
+                out["wrong_status"] = wrong_status
                 if "error_step" in wrong:
                     out["wrong_error_step"] = wrong["error_step"]
+            else:
+                out["wrong_status"] = "failed"
 
         return out
 
@@ -304,11 +337,17 @@ def build_cot_dataset(
     total = len(results)
     mc = sum(1 for r in results.values() if r.get("answer_match"))
     ec = sum(1 for r in results.values() if r.get("status") != "ok")
-    wc = sum(1 for r in results.values() if r.get("wrong_cot"))
-    wf = mc - wc  # 匹配成功但未能生成错误推理的条目
     logger.info(f"完成: {total} 条, 匹配率: {mc}/{total} ({mc/total*100:.1f}%)")
     if generate_wrong:
-        logger.info(f"错误推理: 成功 {wc} 条, 失败(模型算对) {wf} 条")
+        # 按 wrong_status 分类统计
+        ws_counts: dict[str, int] = {}
+        for r in results.values():
+            ws = r.get("wrong_status", "")
+            if ws:
+                ws_counts[ws] = ws_counts.get(ws, 0) + 1
+        logger.info(f"错误推理统计:")
+        for ws, cnt in sorted(ws_counts.items()):
+            logger.info(f"  {ws}: {cnt} 条")
     if ec:
         logger.info(f"异常: {ec} 条")
 
