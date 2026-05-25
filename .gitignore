@@ -39,6 +39,10 @@ env/
 *.swp
 *.swo
 
+# processed test data
+data/processed/test
+
+
 # OS
 .DS_Store
 Thumbs.db
