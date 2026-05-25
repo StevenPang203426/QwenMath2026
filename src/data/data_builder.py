@@ -135,7 +135,7 @@ def _call_api(
     if system_prompt is None:
         system_prompt = _PROMPT_WRONG if generate_wrong else _PROMPT_CORRECT
     if temperature is None:
-        temperature = 0.8 if generate_wrong else 0.3
+        temperature = 1.3 if generate_wrong else 0.3
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -150,7 +150,14 @@ def _call_api(
                 temperature=temperature,
                 max_tokens=1024,
                 stream=False,
+                extra_body={"thinking": {"type": "disabled"}},
             )
+            # 记录缓存命中情况
+            usage = resp.usage
+            cache_hit = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
+            cache_miss = getattr(usage, 'prompt_cache_miss_tokens', 0) or 0
+            if cache_hit > 0:
+                logger.debug(f"缓存命中: {cache_hit} tokens, 未命中: {cache_miss} tokens")
             return _parse_response(resp.choices[0].message.content)
         except Exception as e:
             logger.warning(f"API 调用失败 (尝试 {attempt+1}/{max_retries}): {e}")
