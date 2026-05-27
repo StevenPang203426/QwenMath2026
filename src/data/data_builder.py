@@ -30,6 +30,17 @@ def _get_client(api_key: str):
     return OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
 
 
+def _sanitize_question(q: str) -> str:
+    """清理题目文本中可能导致 API 请求失败的特殊字符"""
+    if not q:
+        return q
+    q = q.replace('\\"', '"')       # 转义引号残留
+    q = q.replace('\\n', '\n')      # 转义换行残留
+    q = q.replace('\\t', ' ')       # 转义制表符
+    q = q.strip()
+    return q
+
+
 def _normalize_answer(s: str) -> float | None:
     """将分数/小数/百分数统一转 float"""
     if not s:
@@ -137,9 +148,10 @@ def _call_api(
     if temperature is None:
         temperature = 0.8 if generate_wrong else 0.3
 
+    question = _sanitize_question(question)
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question},
+        {"role": "user", "content": [{"type": "text", "text": question}]},
     ]
 
     for attempt in range(max_retries):
@@ -148,7 +160,7 @@ def _call_api(
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=1024,
+                max_tokens=8192,
                 stream=False,
             )
             return _parse_response(resp.choices[0].message.content)
