@@ -30,14 +30,16 @@ def _get_client(api_key: str):
     return OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
 
 
-def _sanitize_question(q: str) -> str:
+def _sanitize_question(q) -> str:
     """清理题目文本中可能导致 API 请求失败的特殊字符"""
     if not q:
-        return q
+        return ""
+    if isinstance(q, list):
+        q = "".join(q)
     q = q.replace('\\"', '"')       # 转义引号残留
     q = q.replace('\\n', '\n')      # 转义换行残留
     q = q.replace('\\t', ' ')       # 转义制表符
-    q = q.strip()
+    q = q.strip().strip('"')        # 去除首尾残留引号
     return q
 
 
