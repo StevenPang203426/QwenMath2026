@@ -1,12 +1,14 @@
 """
 失败数据修复脚本（幂等）
 
-扫描 train_cot_raw.json，修复两类失败：
+扫描 train_cot_raw.json，修复三类失败：
   Type A: status=api_failed/parse_error → 重跑正确推理 + 错误推理
   Type B: wrong_status=failed → 直接 hard_fallback（跳过 simple）
+  Type C: answer_match=false（正采样算错）→ 回收旧结果为负样本 + 重跑正确推理
 
 按 prompt 类型分阶段执行以最大化 DeepSeek 上下文缓存命中：
-  Phase 1: 正确推理（_PROMPT_CORRECT，仅 Type A）
+  Phase 1: 正确推理（_PROMPT_CORRECT，Type A + Type C）
+           Type C 在重跑前先回收旧 cot/api_answer 为负样本
   Phase 2: 错误推理 simple（_PROMPT_WRONG，Phase 1 成功项，最多 3 轮）
   Phase 3: 错误推理 hard（_PROMPT_WRONG_HARD，Type B + Phase 2 剩余）
 
@@ -62,12 +64,20 @@ def repair_dataset(
               and item.get("answer_match")
               and item.get("wrong_status") == "failed"]
 
+    # Type C: 正采样算错（answer_match=false, status=ok, 且尚无有效负样本）
+    # 回收旧结果为负样本，再重跑正确推理
+    type_c = [item for item in all_data
+              if item.get("status") == "ok"
+              and not item.get("answer_match")
+              and not item.get("wrong_cot")]  # 尚无已有负样本
+
     # 小批量测试模式
     test_mode = limit > 0
     output_path = input_path
     if test_mode:
         type_a = type_a[:limit]
         type_b = type_b[:limit]
+        type_c = type_c[:limit]
         test_dir = Path(input_path).parent / "test"
         test_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(test_dir / f"repair_test_{limit}.json")
@@ -75,9 +85,10 @@ def repair_dataset(
         logger.info(f"测试输出: {output_path}")
 
     logger.info(f"失败统计: Type A (api/parse 失败): {len(type_a)}, "
-                f"Type B (错误推理失败): {len(type_b)}")
+                f"Type B (错误推理失败): {len(type_b)}, "
+                f"Type C (正采样算错): {len(type_c)}")
 
-    if not type_a and not type_b:
+    if not type_a and not type_b and not type_c:
         logger.info("无需修复，所有数据正常")
         return
 
@@ -88,13 +99,37 @@ def repair_dataset(
     save_every = min(50, max(5, (len(type_a) + len(type_b)) // 5))
 
     # ========================================================
-    # Phase 1: 正确推理（Type A → _PROMPT_CORRECT）
+    # Phase 1: 正确推理（Type A + Type C → _PROMPT_CORRECT）
+    #   Type C 在重跑前先回收旧结果为负样本
     # ========================================================
     need_wrong_simple = []  # Phase 1 成功且答案匹配的，进入 Phase 2
     fixed_a = 0
+    recycled_c = 0
 
-    if type_a:
-        logger.info(f"[Phase 1/3] 正确推理: {len(type_a)} 条")
+    # Type C 回收：将旧的错误正采样保存为负样本
+    type_c_ids = set()
+    for item in type_c:
+        old_cot = item.get("cot", "")
+        old_answer = item.get("api_answer", "")
+        # 质量门槛：cot 非空、api_answer 非空、cot 长度 >= 10
+        if old_cot and old_answer and len(old_cot) >= 10:
+            data_by_id[item["id"]]["wrong_cot"] = old_cot
+            data_by_id[item["id"]]["wrong_answer"] = old_answer
+            data_by_id[item["id"]]["wrong_status"] = "recycled"
+            recycled_c += 1
+            type_c_ids.add(item["id"])
+        else:
+            logger.debug(f"  id={item['id']} 旧数据质量不达标，跳过回收")
+
+    if recycled_c:
+        logger.info(f"[Type C 回收] {recycled_c}/{len(type_c)} 条旧错误结果已保存为负样本")
+
+    # 合并 Type A + Type C 统一重跑正确推理
+    phase1_items = list(type_a) + list(type_c)
+
+    if phase1_items:
+        logger.info(f"[Phase 1/3] 正确推理: {len(phase1_items)} 条 "
+                    f"(Type A: {len(type_a)}, Type C: {len(type_c)})")
 
         def phase1_worker(item):
             result = _call_api(item["question"], client, model)
@@ -102,7 +137,7 @@ def repair_dataset(
 
         completed = 0
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(phase1_worker, it): it for it in type_a}
+            futures = {ex.submit(phase1_worker, it): it for it in phase1_items}
             for fut in as_completed(futures):
                 item_id, result = fut.result()
                 completed += 1
@@ -119,18 +154,21 @@ def repair_dataset(
                     fixed_a += 1
                     if matched:
                         need_wrong_simple.append(data_by_id[item_id])
+                        # Type C 已回收负样本的，不再进 Phase 2
+                        if item_id in type_c_ids:
+                            pass  # wrong_cot/wrong_answer 已在回收时设置
                 else:
                     logger.debug(f"  id={item_id} 仍然失败")
 
                 if completed % save_every == 0:
                     _save(data_by_id, output_path)
-                    logger.info(f"  进度: {completed}/{len(type_a)}")
+                    logger.info(f"  进度: {completed}/{len(phase1_items)}")
 
         _save(data_by_id, output_path)
-        logger.info(f"[Phase 1/3] 完成: 修复 {fixed_a}/{len(type_a)}, "
+        logger.info(f"[Phase 1/3] 完成: 修复 {fixed_a}/{len(phase1_items)}, "
                     f"答案匹配 {len(need_wrong_simple)} 条")
     else:
-        logger.info("[Phase 1/3] 跳过（无 Type A 失败）")
+        logger.info("[Phase 1/3] 跳过（无 Type A/C 失败）")
 
     # ========================================================
     # Phase 2: 错误推理 simple（Phase 1 成功项 → _PROMPT_WRONG）
@@ -138,6 +176,10 @@ def repair_dataset(
     # ========================================================
     need_hard = list(type_b)  # Type B 全部直接进 Phase 3
     simple_success = 0
+
+    # Type C 已回收负样本的不需要再跑错误推理，从 need_wrong_simple 中排除
+    need_wrong_simple = [it for it in need_wrong_simple
+                         if it["id"] not in type_c_ids]
 
     if need_wrong_simple:
         logger.info(f"[Phase 2/3] 错误推理(simple): {len(need_wrong_simple)} 条, 最多 3 轮")
@@ -235,11 +277,12 @@ def repair_dataset(
         logger.info("[Phase 3/3] 跳过（无需 hard 错误推理）")
 
     # ========== 最终统计 ==========
-    total_failures = len(type_a) + len(type_b)
+    total_failures = len(type_a) + len(type_b) + len(type_c)
     total_fixed = fixed_a + simple_success + hard_success
     logger.info("=" * 40)
     logger.info(f"修复总结:")
-    logger.info(f"  Type A (api 失败): {fixed_a}/{len(type_a)} 修复")
+    logger.info(f"  Type A+C 正确推理: {fixed_a}/{len(phase1_items)} 修复")
+    logger.info(f"  Type C 负样本回收: {recycled_c}/{len(type_c)} 条")
     logger.info(f"  错误推理 simple:   {simple_success} 条成功")
     logger.info(f"  错误推理 hard:     {hard_success}/{len(need_hard)} 条成功")
     logger.info(f"  总计: {total_fixed}/{total_failures} 修复")
