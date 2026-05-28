@@ -12,6 +12,12 @@ from trl import GRPOConfig, GRPOTrainer
 
 from src.models.model_loader import load_model_and_tokenizer, apply_lora
 from src.data.answer_extractor import extract_answer
+from src.training.rl_utils import (
+    add_tokenizer_kwarg,
+    filter_supported_kwargs,
+    render_chat_prompt,
+    to_text,
+)
 from src.utils.config import load_config
 from src.utils.seed import set_seed
 from src.utils.metrics import normalize_number
@@ -20,7 +26,7 @@ from src.utils.logger import setup_wandb, finish_wandb
 logger = logging.getLogger("math_solver.grpo_trainer")
 
 
-def _build_grpo_dataset(data_path: str) -> Dataset:
+def _build_grpo_dataset(data_path: str, tokenizer) -> Dataset:
     """
     构建 GRPO 数据集
 
@@ -28,6 +34,7 @@ def _build_grpo_dataset(data_path: str) -> Dataset:
 
     Args:
         data_path: 训练数据路径
+        tokenizer: 用于渲染 chat template 的 tokenizer
 
     Returns:
         HuggingFace Dataset
@@ -40,12 +47,13 @@ def _build_grpo_dataset(data_path: str) -> Dataset:
 
     for item in data:
         instruction = "请一步一步思考，然后给出数字答案。用<think></think>标签包裹推理过程，用<answer></answer>标签包裹最终数字答案。"
-        prompt = [
+        messages = [
             {"role": "system", "content": instruction},
-            {"role": "user", "content": item["question"]},
+            {"role": "user", "content": to_text(item["question"])},
         ]
+        prompt = render_chat_prompt(tokenizer, messages)
         prompts.append(prompt)
-        answers.append(str(item["answer"]))
+        answers.append(to_text(item["answer"]))
 
     return Dataset.from_dict({
         "prompt": prompts,
@@ -146,7 +154,7 @@ def train_grpo(config_path: str) -> None:
     )
 
     # 加载数据
-    train_dataset = _build_grpo_dataset(config.data.train_path)
+    train_dataset = _build_grpo_dataset(config.data.train_path, tokenizer)
     logger.info(f"GRPO 训练集大小: {len(train_dataset)}")
 
     # 构建奖励函数
@@ -154,35 +162,38 @@ def train_grpo(config_path: str) -> None:
 
     # GRPO 配置
     grpo_cfg = config.grpo
-    grpo_config = GRPOConfig(
-        output_dir=config.training.output_dir,
-        per_device_train_batch_size=config.training.per_device_train_batch_size,
-        gradient_accumulation_steps=config.training.gradient_accumulation_steps,
-        num_train_epochs=config.training.num_train_epochs,
-        learning_rate=config.training.learning_rate,
-        warmup_ratio=getattr(config.training, "warmup_ratio", 0.1),
-        lr_scheduler_type=getattr(config.training, "lr_scheduler_type", "cosine"),
-        logging_steps=config.training.logging_steps,
-        save_steps=getattr(config.training, "save_steps", 200),
-        save_total_limit=getattr(config.training, "save_total_limit", 3),
-        bf16=config.training.bf16,
-        gradient_checkpointing=config.training.gradient_checkpointing,
+    grpo_kwargs = {
+        "output_dir": config.training.output_dir,
+        "per_device_train_batch_size": config.training.per_device_train_batch_size,
+        "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
+        "num_train_epochs": config.training.num_train_epochs,
+        "learning_rate": config.training.learning_rate,
+        "warmup_ratio": getattr(config.training, "warmup_ratio", 0.1),
+        "lr_scheduler_type": getattr(config.training, "lr_scheduler_type", "cosine"),
+        "logging_steps": config.training.logging_steps,
+        "save_steps": getattr(config.training, "save_steps", 200),
+        "save_total_limit": getattr(config.training, "save_total_limit", 3),
+        "bf16": config.training.bf16,
+        "gradient_checkpointing": config.training.gradient_checkpointing,
         # GRPO 特有参数
-        num_generations=grpo_cfg.num_generations,
-        max_completion_length=getattr(grpo_cfg, "max_completion_length", 512),
-        max_prompt_length=getattr(grpo_cfg, "max_prompt_length", 256),
-        temperature=grpo_cfg.temperature,
-        report_to="wandb",
-    )
+        "num_generations": grpo_cfg.num_generations,
+        "max_completion_length": getattr(grpo_cfg, "max_completion_length", 512),
+        "max_prompt_length": getattr(grpo_cfg, "max_prompt_length", 256),
+        "temperature": grpo_cfg.temperature,
+        "top_p": getattr(grpo_cfg, "top_p", 1.0),
+        "report_to": "wandb",
+    }
+    grpo_config = GRPOConfig(**filter_supported_kwargs(GRPOConfig, grpo_kwargs))
 
     # GRPO Trainer
-    trainer = GRPOTrainer(
-        model=model,
-        args=grpo_config,
-        train_dataset=train_dataset,
-        reward_funcs=reward_funcs,
-        processing_class=tokenizer,
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": grpo_config,
+        "train_dataset": train_dataset,
+        "reward_funcs": reward_funcs,
+    }
+    add_tokenizer_kwarg(GRPOTrainer, trainer_kwargs, tokenizer)
+    trainer = GRPOTrainer(**filter_supported_kwargs(GRPOTrainer.__init__, trainer_kwargs))
 
     # 开始训练
     logger.info("开始 GRPO 训练...")

@@ -320,6 +320,125 @@ has_wrong = bool(d.get("wrong_cot", "").strip())
 
 ---
 
+## 28. DPO 数据转换 ArrowInvalid：list 与 str 混用
+
+**现象：** 运行 `bash scripts/run_dpo.sh` 时，DPO 数据加载阶段报错：
+```text
+pyarrow.lib.ArrowInvalid: cannot mix list and non-list, non-null values
+```
+
+**原因：** `Dataset.from_dict()` 会通过 PyArrow 推断列类型，同一列或嵌套字段中不能同时出现 list 和 str。远端 `train_dpo.json` 中部分字段可能来自 OpenAI/DeepSeek 内容块格式，例如 `question=[{"type":"text","text":"..."}]`，而其他样本是普通字符串。`dpo_trainer.py` 又把 `question` 放入 `prompt[1]["content"]`，导致 `prompt.content` 中混入 list 和 str。
+
+**解决：** 新增 `_to_text()` 文本归一化函数，在 DPO 加载和 DPO 数据生成阶段统一把 `question`、`instruction`、`chosen`、`rejected` 转为字符串。
+
+**修改位置：**
+- `src/training/dpo_trainer.py`：`_load_dpo_dataset()` 中调用 `_to_text()`，避免 Arrow 类型推断失败
+- `src/data/preprocessor.py`：`prepare_dpo_data()` 输出前将 `question` 归一化，防止后续生成的新数据再次混入 list
+
+**排查命令：**
+```bash
+python - <<'PY'
+import json, collections
+p = "data/processed/train_dpo.json"
+data = json.load(open(p, encoding="utf-8"))
+for f in ["question", "instruction", "chosen", "rejected"]:
+    c = collections.Counter(type(x.get(f)).__name__ for x in data)
+    print(f, c)
+PY
+```
+
+---
+
+## 29. TRL DPOConfig 参数版本不兼容
+
+**现象：** DPO 数据加载成功后，构造 `DPOConfig` 时报错：
+```text
+TypeError: DPOConfig.__init__() got an unexpected keyword argument 'max_prompt_length'
+```
+
+**原因：** 不同版本 TRL 的 `DPOConfig` API 不一致。当前环境中的 `DPOConfig` 不接受 `max_prompt_length`，而代码固定传入该参数，导致初始化失败。
+
+**解决：** 新增 `_filter_supported_kwargs()`，通过 `inspect.signature()` 检查当前安装版本实际支持的参数，只传入支持的 kwargs。`DPOTrainer` 同样做兼容处理：新版使用 `processing_class=tokenizer`，旧版使用 `tokenizer=tokenizer`。
+
+**修改位置：** `src/training/dpo_trainer.py`
+
+**版本检查命令：**
+```bash
+python - <<'PY'
+import trl, inspect
+from trl import DPOConfig, DPOTrainer
+
+print("trl version:", trl.__version__)
+print("DPOConfig:", inspect.signature(DPOConfig))
+print("DPOTrainer:", inspect.signature(DPOTrainer.__init__))
+PY
+```
+
+---
+
+## 30. TRL Tokenizing 阶段 prompt/list 与 chosen/str 拼接错误
+
+**现象：** `DPOTrainer` 初始化进入 tokenizing 阶段后报错：
+```text
+TypeError: can only concatenate list (not "str") to list
+```
+
+**原因：** 当前 TRL 内部 tokenizing 逻辑会执行：
+```python
+example["prompt"] + example["chosen"]
+```
+当 `prompt` 是 chat message list，而 `chosen` 是普通字符串时，实际变成 `list + str`，无法拼接。
+
+**解决：** 在 `_load_dpo_dataset()` 中提前使用 tokenizer 的 chat template 将 system/user prompt 渲染为字符串：
+```python
+prompt = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True,
+)
+```
+这样传给 TRL 的 `prompt`、`chosen`、`rejected` 三列都是字符串，内部 `prompt + chosen` 可以正常执行。
+
+**修改位置：** `src/training/dpo_trainer.py`，`_load_dpo_dataset(data_path, tokenizer)` 接收 tokenizer 并渲染 prompt 字符串。
+
+**验证：** 修改后至少通过语法检查：
+```bash
+python -m py_compile src/training/dpo_trainer.py src/data/preprocessor.py
+```
+
+---
+
+## 31. GRPO 数据转换 ArrowInvalid：与 DPO 相同的字段类型混用
+
+**现象：** 运行 GRPO 训练时，加载原始训练集并构造 HuggingFace Dataset 报错：
+```text
+pyarrow.lib.ArrowInvalid: cannot mix list and non-list, non-null values
+```
+
+**原因：** `grpo_trainer.py` 原先直接把 `item["question"]` 放入 chat message：
+```python
+{"role": "user", "content": item["question"]}
+```
+当原始数据中部分 `question` 是内容块 list、部分是普通字符串时，`Dataset.from_dict()` 在推断 `prompt.content` 类型时失败。该问题与 DPO 的 ArrowInvalid 本质相同。
+
+**解决：** 抽取 DPO/GRPO 共用 RL 训练工具模块 `src/training/rl_utils.py`：
+- `to_text()`：统一将 str/list/dict/None 转为字符串
+- `render_chat_prompt()`：用 tokenizer 的 chat template 将 messages 渲染为字符串 prompt
+- `filter_supported_kwargs()`：过滤当前 TRL 版本不支持的 Config/Trainer 参数
+- `add_tokenizer_kwarg()`：兼容 `processing_class=tokenizer` 与旧版 `tokenizer=tokenizer`
+
+**修改位置：**
+- `src/training/rl_utils.py`：新增共用工具函数
+- `src/training/dpo_trainer.py`：移除重复 `_to_text()` / `_filter_supported_kwargs()`，改用共用模块
+- `src/training/grpo_trainer.py`：`_build_grpo_dataset(data_path, tokenizer)` 中将 `question` 归一化，并把 chat messages 渲染为字符串 prompt
+
+**验证：**
+```bash
+python -m py_compile src/training/rl_utils.py src/training/dpo_trainer.py src/training/grpo_trainer.py
+```
+
+---
+
 ## 待解决 / 后续计划
 
 | 编号 | 事项 | 状态 |
