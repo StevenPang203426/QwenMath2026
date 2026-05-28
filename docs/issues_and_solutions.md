@@ -262,6 +262,64 @@ python -m src.data.data_repair --api_key "$DEEPSEEK_API_KEY" --limit 5  # 测试
 
 ---
 
+## 24. Type C 回收：错误正采样作为 DPO 负样本
+
+**需求：** 正采样结果 answer_match=false（API 算错了），这些错误推理可以直接作为 DPO 负样本使用，无需浪费。
+
+**设计：**
+- 质量门槛：cot 非空、api_answer 非空、cot 长度 ≥ 10
+- 达标的旧 cot/api_answer 保存为 wrong_cot/wrong_answer，wrong_status="recycled"
+- 然后重跑正确推理（合并进 Phase 1）
+- 已回收负样本的条目跳过 Phase 2（不再重复生成错误推理）
+
+**额外检测 — ground_truth_suspect：**
+- 如果重跑后 API 再次给出与回收的 wrong_answer 相同的答案（模型两次算出同一结果，但与标注不同），标记 `wrong_status="ground_truth_suspect"`，清除回收的负样本
+- 这类条目大概率是标注错误，需要人工审查
+
+---
+
+## 25. 按实际数据状态筛选，不依赖特定字段值
+
+**现象：** 部分 JSON 条目缺少 `status`、`wrong_status` 等字段（如早期生成的数据），导致基于字段值的筛选（`status == "api_failed"`）遗漏这些条目。
+
+**解决：** 所有分类逻辑改为检查实际数据状态：
+```python
+has_cot = bool(d.get("cot", "").strip())
+has_api_answer = bool(d.get("api_answer", "").strip())
+matched = d.get("answer_match", False)
+has_wrong = bool(d.get("wrong_cot", "").strip())
+```
+不再依赖 `status`、`wrong_status` 的具体值来决定是否需要修复。
+
+---
+
+## 26. _PROMPT_CORRECT 优化：提升 CoT 质量与可学习性
+
+**需求：** 为 Qwen2.5-0.5B 生成更易学习的细粒度推理链。
+
+**优化项：**
+- LaTeX 禁令从单一示例（frac）扩展为通用规则（`\frac`、`\times`、`\sqrt`、`\pi` 等所有反斜杠命令）
+- 明确运算符号规范：乘号写×，除号写÷，分数写 a/b
+- 答案形式规则细化：百分率 → 25% 形式；分率 → 3/5 形式；能整除给整数，不能整除保留小数或分数
+- 新增推理粒度约束："每步只做一个运算，不要跳步，不要合并多步计算"
+- 用【格式要求】【计算规则】【推理要求】分区，结构更清晰
+
+---
+
+## 27. 缺少 wrong_cot/wrong_answer 字段的条目处理
+
+**现象：** 部分 JSON 条目完全不含 `wrong_cot`、`wrong_answer` 字段（非空字符串，而是字段本身缺失）。
+
+**原因：** 早期 data_builder.py 生成时未写入这些字段，或中途中断。
+
+**解决：** `d.get("wrong_cot", "")` 对缺失字段返回空字符串，`has_wrong` 判定为 False。这些条目会被分类为：
+- `type_b_fresh`（如果正确推理已匹配）→ Phase 2 (simple) → Phase 3 (hard)
+- `type_c`（如果正确推理不匹配）→ 回收 + 重跑
+
+无需特殊处理，通用逻辑已覆盖。
+
+---
+
 ## 待解决 / 后续计划
 
 | 编号 | 事项 | 状态 |
