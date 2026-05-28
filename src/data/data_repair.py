@@ -11,8 +11,8 @@
   Phase 3: 错误推理 hard（_PROMPT_WRONG_HARD，Type B + Phase 2 剩余）
 
 用法:
-  python -m src.data.data_repair --api_key YOUR_KEY              # 全量修复
-  python -m src.data.data_repair --api_key YOUR_KEY --limit 10   # 小批量测试
+  python -m src.data.data_repair --api_key "$DEEPSEEK_API_KEY"              # 全量修复
+  python -m src.data.data_repair --api_key "$DEEPSEEK_API_KEY" --limit 10   # 小批量测试
 """
 import json
 import logging
