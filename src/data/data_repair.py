@@ -19,6 +19,7 @@
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -29,6 +30,13 @@ from src.data.data_builder import (
 )
 
 logger = logging.getLogger("math_solver.data_repair")
+
+_LATEX_PATTERN = re.compile(r'\\[a-zA-Z]')
+
+
+def _has_latex(text: str) -> bool:
+    """检测文本是否包含 LaTeX 命令（如 \\frac, \\times, \\pi 等）"""
+    return bool(_LATEX_PATTERN.search(text)) if text else False
 
 
 def repair_dataset(
@@ -88,19 +96,110 @@ def repair_dataset(
         logger.info(f"小批量测试模式: Type A {len(type_a)} 条, Type B {len(type_b)} 条")
         logger.info(f"测试输出: {output_path}")
 
-    logger.info(f"失败统计: Type A (api/parse 失败): {len(type_a)}, "
-                f"Type B (错误推理失败): {len(type_b)}, "
+    # ========================================================
+    # 预处理 0a: LaTeX cot 降级为 wrong_cot
+    # ========================================================
+    latex_items = []  # cot 含 LaTeX，需要重跑正确推理
+    latex_demoted = 0
+    for item in all_data:
+        cot = item.get("cot", "")
+        if _has_latex(cot):
+            wrong_cot = item.get("wrong_cot", "")
+            # 如果 wrong_cot 为空或也有 LaTeX，则将 cot 降级为 wrong_cot
+            if not wrong_cot.strip() or _has_latex(wrong_cot):
+                data_by_id[item["id"]]["wrong_cot"] = cot
+                data_by_id[item["id"]]["wrong_answer"] = item.get("api_answer", "")
+                data_by_id[item["id"]]["wrong_status"] = "latex_demoted"
+            # cot 清空，标记为需要重跑
+            data_by_id[item["id"]]["cot"] = ""
+            data_by_id[item["id"]]["api_answer"] = ""
+            data_by_id[item["id"]]["answer_match"] = False
+            latex_items.append(item)
+            latex_demoted += 1
+
+    if latex_demoted:
+        logger.info(f"[预处理 LaTeX] {latex_demoted} 条 cot 含 LaTeX，已降级为 wrong_cot")
+
+    # ========================================================
+    # 预处理 0b: answer_match=false 强制修正 / 删除
+    # ========================================================
+    force_fixed = 0
+    deleted_ids = set()
+    for item in all_data:
+        iid = item["id"]
+        d = data_by_id[iid]
+        # 只处理有 api_answer 和 wrong_answer 但不匹配的（排除空数据）
+        if (not d.get("answer_match")
+                and d.get("api_answer", "").strip()
+                and d.get("wrong_answer", "").strip()):
+            if _answers_match(d["api_answer"], d["wrong_answer"]):
+                # 两次算出同一答案 → 强制修正 ground truth
+                old_answer = d["answer"]
+                d["answer"] = d["api_answer"]
+                d["answer_match"] = True
+                force_fixed += 1
+                logger.debug(f"  id={iid} 强制修正: {old_answer} → {d['answer']}")
+            else:
+                # api_answer != wrong_answer，数据不可靠 → 删除
+                deleted_ids.add(iid)
+
+    if force_fixed:
+        logger.info(f"[预处理 强制修正] {force_fixed} 条 answer 已修正为 API 共识答案")
+    if deleted_ids:
+        # 从数据中彻底移除
+        for did in deleted_ids:
+            del data_by_id[did]
+        all_data = [item for item in all_data if item["id"] not in deleted_ids]
+        logger.info(f"[预处理 删除] {len(deleted_ids)} 条数据已删除（api_answer != wrong_answer）")
+
+    # ========================================================
+    # 重新筛选（预处理可能改变了数据状态）
+    # ========================================================
+    type_a = []
+    type_b_fresh = []   # 从未尝试过 simple 错误推理 → Phase 2 先试
+    type_b_failed = []  # simple 已失败过 → 直接 Phase 3
+    type_c = []
+    for item in all_data:
+        d = data_by_id[item["id"]]
+        has_cot = bool(d.get("cot", "").strip())
+        has_api_answer = bool(d.get("api_answer", "").strip())
+        matched = d.get("answer_match", False)
+        has_wrong = bool(d.get("wrong_cot", "").strip())
+
+        if not has_cot or not has_api_answer:
+            type_a.append(d)
+        elif matched and not has_wrong:
+            ws = d.get("wrong_status", "")
+            if ws == "failed":
+                type_b_failed.append(d)
+            else:
+                type_b_fresh.append(d)
+        elif not matched and not has_wrong:
+            type_c.append(d)
+
+    # 小批量测试模式：重新应用 limit（预处理可能改变了分类）
+    if test_mode:
+        type_a = type_a[:limit]
+        type_b_fresh = type_b_fresh[:limit]
+        type_b_failed = type_b_failed[:limit]
+        type_c = type_c[:limit]
+
+    logger.info(f"失败统计: Type A (正确推理缺失): {len(type_a)}, "
+                f"Type B-fresh (需 simple): {len(type_b_fresh)}, "
+                f"Type B-failed (直接 hard): {len(type_b_failed)}, "
                 f"Type C (正采样算错): {len(type_c)}")
 
-    if not type_a and not type_b and not type_c:
+    if not type_a and not type_b_fresh and not type_b_failed and not type_c:
         logger.info("无需修复，所有数据正常")
+        _save(data_by_id, output_path)
         return
 
     client = _get_client(api_key)
     INST = "请一步一步思考，然后给出数字答案。"
 
     # 保存间隔
-    save_every = min(50, max(5, (len(type_a) + len(type_b)) // 5))
+    total_todo = len(type_a) + len(type_b_fresh) + len(type_b_failed) + len(type_c)
+    save_every = min(50, max(5, total_todo // 5))
 
     # ========================================================
     # Phase 1: 正确推理（Type A + Type C → _PROMPT_CORRECT）
@@ -109,6 +208,7 @@ def repair_dataset(
     need_wrong_simple = []  # Phase 1 成功且答案匹配的，进入 Phase 2
     fixed_a = 0
     recycled_c = 0
+    suspect_count = 0
 
     # Type C 回收：将旧的错误正采样保存为负样本
     type_c_ids = set()
@@ -156,11 +256,24 @@ def repair_dataset(
                         "status": "ok",
                     })
                     fixed_a += 1
+
                     if matched:
                         need_wrong_simple.append(data_by_id[item_id])
                         # Type C 已回收负样本的，不再进 Phase 2
                         if item_id in type_c_ids:
                             pass  # wrong_cot/wrong_answer 已在回收时设置
+                    elif item_id in type_c_ids:
+                        # Type C 重跑仍不匹配：检查回收的负样本是否和新结果一致
+                        old_wrong = data_by_id[item_id].get("wrong_answer", "")
+                        if _answers_match(result["answer"], old_wrong):
+                            # 模型两次算出同一答案 → 大概率标注有误，清除回收的负样本
+                            data_by_id[item_id]["wrong_cot"] = ""
+                            data_by_id[item_id]["wrong_answer"] = ""
+                            data_by_id[item_id]["wrong_status"] = "ground_truth_suspect"
+                            suspect_count += 1
+                            logger.info(
+                                f"  id={item_id} 疑似标注错误: "
+                                f"API={result['answer']}, 标注={data_by_id[item_id]['answer']}")
                 else:
                     logger.debug(f"  id={item_id} 仍然失败")
 
@@ -178,12 +291,14 @@ def repair_dataset(
     # Phase 2: 错误推理 simple（Phase 1 成功项 → _PROMPT_WRONG）
     #          最多 3 轮，每轮用相同 prompt 最大化缓存命中
     # ========================================================
-    need_hard = list(type_b)  # Type B 全部直接进 Phase 3
+    need_hard = list(type_b_failed)  # 之前 simple 已失败的，直接进 Phase 3
     simple_success = 0
 
     # Type C 已回收负样本的不需要再跑错误推理，从 need_wrong_simple 中排除
     need_wrong_simple = [it for it in need_wrong_simple
                          if it["id"] not in type_c_ids]
+    # Type B-fresh（包括缺少 wrong_cot/wrong_answer 字段的条目）先走 simple
+    need_wrong_simple.extend(type_b_fresh)
 
     if need_wrong_simple:
         logger.info(f"[Phase 2/3] 错误推理(simple): {len(need_wrong_simple)} 条, 最多 3 轮")
@@ -281,12 +396,13 @@ def repair_dataset(
         logger.info("[Phase 3/3] 跳过（无需 hard 错误推理）")
 
     # ========== 最终统计 ==========
-    total_failures = len(type_a) + len(type_b) + len(type_c)
+    total_failures = len(type_a) + len(type_b_fresh) + len(type_b_failed) + len(type_c)
     total_fixed = fixed_a + simple_success + hard_success
     logger.info("=" * 40)
     logger.info(f"修复总结:")
     logger.info(f"  Type A+C 正确推理: {fixed_a}/{len(phase1_items)} 修复")
     logger.info(f"  Type C 负样本回收: {recycled_c}/{len(type_c)} 条")
+    logger.info(f"  疑似标注错误:      {suspect_count} 条 (wrong_status=ground_truth_suspect)")
     logger.info(f"  错误推理 simple:   {simple_success} 条成功")
     logger.info(f"  错误推理 hard:     {hard_success}/{len(need_hard)} 条成功")
     logger.info(f"  总计: {total_fixed}/{total_failures} 修复")
@@ -297,9 +413,9 @@ def repair_dataset(
 
     # 剩余失败统计
     still_failed_a = sum(1 for it in type_a
-                         if data_by_id[it["id"]].get("status") != "ok")
-    still_failed_b = sum(1 for it in (type_b + need_wrong_simple)
-                         if data_by_id[it["id"]].get("wrong_status") == "failed")
+                         if data_by_id.get(it["id"], {}).get("status") != "ok")
+    still_failed_b = sum(1 for it in (type_b_fresh + type_b_failed + need_wrong_simple)
+                         if data_by_id.get(it["id"], {}).get("wrong_status") == "failed")
     if still_failed_a or still_failed_b:
         logger.info(f"  仍失败: api={still_failed_a}, wrong={still_failed_b}")
         logger.info(f"  可再次运行本脚本继续修复")

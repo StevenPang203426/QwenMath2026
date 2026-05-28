@@ -226,6 +226,42 @@ python -m src.data.data_repair --api_key "$DEEPSEEK_API_KEY" --limit 5  # 测试
 
 ---
 
+## 21. LaTeX cot 检测与降级
+
+**现象：** 部分正确推理（cot）中包含 LaTeX 格式（如 `\frac`, `\times`, `\pi`），Qwen2.5-0.5B 无法正确学习这种格式。
+
+**解决：** 在 `data_repair.py` 预处理阶段 0a 中：
+- 使用 `re.compile(r'\\[a-zA-Z]')` 检测 LaTeX 命令
+- 含 LaTeX 的 cot 降级为 wrong_cot（作为 DPO 负样本）
+- 清空 cot 和 api_answer，标记为需要重跑正确推理
+- 更新 `_PROMPT_CORRECT` 明确禁止 LaTeX 格式
+
+---
+
+## 22. answer_match=false 强制修正与删除
+
+**现象：** 部分条目 answer_match=false，但同时有 api_answer 和 wrong_answer。
+
+**解决：** 在 `data_repair.py` 预处理阶段 0b 中：
+- 如果 `api_answer == wrong_answer`（两次算出同一答案）→ 强制将 `answer` 修正为该共识答案
+- 如果 `api_answer != wrong_answer`（数据不可靠）→ 从 JSON 数组中彻底移除该记录
+
+---
+
+## 23. Type B 路由优化：区分 fresh 与 failed
+
+**现象：** 重新筛选后，type_b 错误地将从未尝试过 simple 错误推理的"新鲜"条目直接送入 Phase 3 (hard_fallback)，跳过了 3 轮 simple 尝试。
+
+**原因：** 从"按字段值筛选"改为"按实际数据状态筛选"后，type_b 捕获了所有"已匹配但无错误推理"的条目。
+
+**解决：** 将 type_b 拆分为：
+- `type_b_fresh`：无 wrong_status 或 wrong_status 非 failed → 先走 Phase 2 (simple)
+- `type_b_failed`：wrong_status=failed → 直接走 Phase 3 (hard)
+
+同时修复小批量测试模式的 limit 在预处理重新筛选后丢失的问题。
+
+---
+
 ## 待解决 / 后续计划
 
 | 编号 | 事项 | 状态 |
