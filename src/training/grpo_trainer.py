@@ -11,6 +11,7 @@ from peft import PeftModel
 from trl import GRPOConfig, GRPOTrainer
 
 from src.models.model_loader import load_model_and_tokenizer, apply_lora
+from src.models.reward import build_reward_funcs
 from src.data.answer_extractor import extract_answer
 from src.training.rl_utils import (
     add_tokenizer_kwarg,
@@ -63,53 +64,22 @@ def _build_grpo_dataset(data_path: str, tokenizer) -> Dataset:
 
 def _make_reward_funcs(config):
     """
-    构建 GRPO 的奖励函数列表
+    构建 GRPO 的五维奖励函数列表
+
+    返回 5 个独立奖励函数，TRL GRPOTrainer 自动求和并分维度记录日志：
+      1. 正确性   (-0.5 ~ +1.0)
+      2. 格式标签  ( 0.0 ~ +0.2)
+      3. 逻辑词   (-0.3 ~ +0.95)
+      4. 长度正则  (-0.3 ~  0.0)
+      5. 无LaTeX  (-0.3 ~  0.0)
 
     Args:
-        config: 配置对象
+        config: 配置对象（保留参数以兼容调用方式）
 
     Returns:
         奖励函数列表
     """
-    reward_cfg = config.reward if hasattr(config, 'reward') else None
-    fmt_weight = getattr(reward_cfg, 'format_weight', 0.2) if reward_cfg else 0.2
-    cor_weight = getattr(reward_cfg, 'correctness_weight', 1.0) if reward_cfg else 1.0
-
-    def format_reward_fn(completions, **kwargs):
-        """格式奖励：检查是否包含 <think> 和 <answer> 标签"""
-        rewards = []
-        for completion in completions:
-            text = completion[0]["content"] if isinstance(completion, list) else completion
-            has_think = bool(re.search(r'<think>.*?</think>', text, re.DOTALL))
-            has_answer = bool(re.search(r'<answer>.*?</answer>', text, re.DOTALL))
-            reward = fmt_weight * (1.0 if (has_think and has_answer) else 0.0)
-            rewards.append(reward)
-        return rewards
-
-    def correctness_reward_fn(completions, answer=None, **kwargs):
-        """正确性奖励：检查答案是否正确"""
-        rewards = []
-        for i, completion in enumerate(completions):
-            text = completion[0]["content"] if isinstance(completion, list) else completion
-            gold = answer[i] if answer else None
-
-            if gold is None:
-                rewards.append(0.0)
-                continue
-
-            predicted = extract_answer(text)
-            pred_norm = normalize_number(predicted)
-            gold_norm = normalize_number(str(gold))
-
-            is_correct = (
-                pred_norm is not None
-                and gold_norm is not None
-                and pred_norm == gold_norm
-            )
-            rewards.append(cor_weight if is_correct else 0.0)
-        return rewards
-
-    return [format_reward_fn, correctness_reward_fn]
+    return build_reward_funcs()
 
 
 def train_grpo(config_path: str) -> None:
