@@ -40,8 +40,8 @@ env/
 *.swo
 
 #data
-data/processed/test/
-data/
+data/processed/test
+data
 
 
 # OS

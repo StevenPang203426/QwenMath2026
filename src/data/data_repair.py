@@ -54,22 +54,26 @@ def repair_dataset(
 
     data_by_id = {item["id"]: item for item in all_data}
 
-    # ========== 2. 筛选失败条目 ==========
-    type_a = [item for item in all_data
-              if item.get("status") == "api_failed"
-              or str(item.get("status", "")).startswith("parse_error")]
+    # ========== 2. 筛选失败条目（按实际数据状态判断） ==========
+    type_a = []  # 正确推理缺失：需要重跑
+    type_b = []  # 正确推理有了，但错误推理缺失
+    type_c = []  # 正采样算错：回收为负样本 + 重跑
 
-    type_b = [item for item in all_data
-              if item.get("status") == "ok"
-              and item.get("answer_match")
-              and item.get("wrong_status") == "failed"]
+    for item in all_data:
+        has_cot = bool(item.get("cot", "").strip())
+        has_api_answer = bool(item.get("api_answer", "").strip())
+        matched = item.get("answer_match", False)
+        has_wrong = bool(item.get("wrong_cot", "").strip())
 
-    # Type C: 正采样算错（answer_match=false, status=ok, 且尚无有效负样本）
-    # 回收旧结果为负样本，再重跑正确推理
-    type_c = [item for item in all_data
-              if item.get("status") == "ok"
-              and not item.get("answer_match")
-              and not item.get("wrong_cot")]  # 尚无已有负样本
+        if not has_cot or not has_api_answer:
+            # 正确推理缺失（含 api_failed、parse_error、无 status 等情况）
+            type_a.append(item)
+        elif matched and not has_wrong:
+            # 正确推理有了且匹配，但缺少错误推理
+            type_b.append(item)
+        elif not matched and not has_wrong:
+            # 正采样算错，且尚无负样本可用
+            type_c.append(item)
 
     # 小批量测试模式
     test_mode = limit > 0
