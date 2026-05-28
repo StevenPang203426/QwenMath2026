@@ -4,6 +4,7 @@ DPO 训练模块
 """
 import json
 import logging
+import inspect
 from typing import Any
 from datasets import Dataset
 from transformers import AutoTokenizer
@@ -33,6 +34,14 @@ def _to_text(value: Any) -> str:
             return _to_text(value["content"])
         return json.dumps(value, ensure_ascii=False)
     return str(value)
+
+
+def _filter_supported_kwargs(cls_or_fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep only kwargs supported by the installed TRL version."""
+    signature = inspect.signature(cls_or_fn)
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in signature.parameters}
 
 
 def _load_dpo_dataset(data_path: str) -> Dataset:
@@ -136,34 +145,44 @@ def train_dpo(config_path: str) -> None:
     logger.info(f"DPO 训练集大小: {len(train_dataset)}")
 
     # DPO 配置
-    dpo_config = DPOConfig(
-        output_dir=config.training.output_dir,
-        per_device_train_batch_size=config.training.per_device_train_batch_size,
-        gradient_accumulation_steps=config.training.gradient_accumulation_steps,
-        num_train_epochs=config.training.num_train_epochs,
-        learning_rate=config.training.learning_rate,
-        warmup_ratio=getattr(config.training, "warmup_ratio", 0.1),
-        lr_scheduler_type=getattr(config.training, "lr_scheduler_type", "cosine"),
-        logging_steps=config.training.logging_steps,
-        save_steps=getattr(config.training, "save_steps", 200),
-        save_total_limit=getattr(config.training, "save_total_limit", 3),
-        bf16=config.training.bf16,
-        gradient_checkpointing=config.training.gradient_checkpointing,
-        beta=config.dpo.beta,
-        loss_type=getattr(config.dpo, "loss_type", "sigmoid"),
-        max_length=getattr(config.dpo, "max_length", 768),
-        max_prompt_length=getattr(config.dpo, "max_prompt_length", 256),
-        report_to="wandb",
-    )
+    dpo_kwargs = {
+        "output_dir": config.training.output_dir,
+        "per_device_train_batch_size": config.training.per_device_train_batch_size,
+        "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
+        "num_train_epochs": config.training.num_train_epochs,
+        "learning_rate": config.training.learning_rate,
+        "warmup_ratio": getattr(config.training, "warmup_ratio", 0.1),
+        "lr_scheduler_type": getattr(config.training, "lr_scheduler_type", "cosine"),
+        "logging_steps": config.training.logging_steps,
+        "save_steps": getattr(config.training, "save_steps", 200),
+        "save_total_limit": getattr(config.training, "save_total_limit", 3),
+        "bf16": config.training.bf16,
+        "gradient_checkpointing": config.training.gradient_checkpointing,
+        "beta": config.dpo.beta,
+        "loss_type": getattr(config.dpo, "loss_type", "sigmoid"),
+        "max_length": getattr(config.dpo, "max_length", 768),
+        "max_prompt_length": getattr(config.dpo, "max_prompt_length", 256),
+        "report_to": "wandb",
+    }
+    dpo_config = DPOConfig(**_filter_supported_kwargs(DPOConfig, dpo_kwargs))
 
     # DPO Trainer
-    trainer = DPOTrainer(
-        model=model,
-        ref_model=ref_model,
-        args=dpo_config,
-        train_dataset=train_dataset,
-        processing_class=tokenizer,
-    )
+    trainer_kwargs = {
+        "model": model,
+        "ref_model": ref_model,
+        "args": dpo_config,
+        "train_dataset": train_dataset,
+        "beta": config.dpo.beta,
+        "loss_type": getattr(config.dpo, "loss_type", "sigmoid"),
+        "max_length": getattr(config.dpo, "max_length", 768),
+        "max_prompt_length": getattr(config.dpo, "max_prompt_length", 256),
+    }
+    trainer_params = inspect.signature(DPOTrainer.__init__).parameters
+    if "processing_class" in trainer_params:
+        trainer_kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in trainer_params:
+        trainer_kwargs["tokenizer"] = tokenizer
+    trainer = DPOTrainer(**_filter_supported_kwargs(DPOTrainer.__init__, trainer_kwargs))
 
     # 开始训练
     logger.info("开始 DPO 训练...")
