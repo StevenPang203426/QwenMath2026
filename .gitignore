@@ -39,8 +39,9 @@ env/
 *.swp
 *.swo
 
-# processed test data
+#data
 data/processed/test
+data
 
 
 # OS
