@@ -44,12 +44,13 @@ def _filter_supported_kwargs(cls_or_fn: Any, kwargs: dict[str, Any]) -> dict[str
     return {key: value for key, value in kwargs.items() if key in signature.parameters}
 
 
-def _load_dpo_dataset(data_path: str) -> Dataset:
+def _load_dpo_dataset(data_path: str, tokenizer: AutoTokenizer) -> Dataset:
     """
     加载 DPO 偏好数据并转换为 HuggingFace Dataset
 
     Args:
         data_path: DPO 数据路径
+        tokenizer: 用于渲染 chat template 的 tokenizer
 
     Returns:
         HuggingFace Dataset 对象
@@ -63,10 +64,15 @@ def _load_dpo_dataset(data_path: str) -> Dataset:
 
     for item in data:
         instruction = _to_text(item.get("instruction", "请一步一步思考，然后给出数字答案。"))
-        prompt = [
+        messages = [
             {"role": "system", "content": instruction},
             {"role": "user", "content": _to_text(item["question"])},
         ]
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
         prompts.append(prompt)
         chosens.append(_to_text(item["chosen"]))
         rejecteds.append(_to_text(item["rejected"]))
@@ -141,7 +147,7 @@ def train_dpo(config_path: str) -> None:
         ref_model = ref_model.merge_and_unload()
 
     # 加载数据
-    train_dataset = _load_dpo_dataset(config.data.train_path)
+    train_dataset = _load_dpo_dataset(config.data.train_path, tokenizer)
     logger.info(f"DPO 训练集大小: {len(train_dataset)}")
 
     # DPO 配置
