@@ -4,6 +4,7 @@ DPO 训练模块
 """
 import json
 import logging
+from typing import Any
 from datasets import Dataset
 from transformers import AutoTokenizer
 from trl import DPOConfig, DPOTrainer
@@ -15,6 +16,23 @@ from src.utils.seed import set_seed
 from src.utils.logger import setup_wandb, finish_wandb
 
 logger = logging.getLogger("math_solver.dpo_trainer")
+
+
+def _to_text(value: Any) -> str:
+    """Normalize JSON text fields before Arrow infers column types."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_to_text(part) for part in value)
+    if isinstance(value, dict):
+        if "text" in value:
+            return _to_text(value["text"])
+        if "content" in value:
+            return _to_text(value["content"])
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 def _load_dpo_dataset(data_path: str) -> Dataset:
@@ -35,14 +53,14 @@ def _load_dpo_dataset(data_path: str) -> Dataset:
     rejecteds = []
 
     for item in data:
-        instruction = item.get("instruction", "请一步一步思考，然后给出数字答案。")
+        instruction = _to_text(item.get("instruction", "请一步一步思考，然后给出数字答案。"))
         prompt = [
             {"role": "system", "content": instruction},
-            {"role": "user", "content": item["question"]},
+            {"role": "user", "content": _to_text(item["question"])},
         ]
         prompts.append(prompt)
-        chosens.append(item["chosen"])
-        rejecteds.append(item["rejected"])
+        chosens.append(_to_text(item["chosen"]))
+        rejecteds.append(_to_text(item["rejected"]))
 
     return Dataset.from_dict({
         "prompt": prompts,

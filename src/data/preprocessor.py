@@ -6,9 +6,26 @@ import json
 import random
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("math_solver.preprocessor")
+
+
+def _to_text(value: Any) -> str:
+    """Normalize raw dataset fields that may be strings or content lists."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_to_text(part) for part in value)
+    if isinstance(value, dict):
+        if "text" in value:
+            return _to_text(value["text"])
+        if "content" in value:
+            return _to_text(value["content"])
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 def split_train_val(
@@ -132,8 +149,8 @@ def prepare_dpo_data(
 
         dpo_data.append({
             "id": item["id"],
-            "question": item["question"],
-            "instruction": "请一步一步思考，然后给出数字答案。",
+            "question": _to_text(item["question"]),
+            "instruction": _to_text("请一步一步思考，然后给出数字答案。"),
             "chosen": chosen,
             "rejected": rejected,
         })
