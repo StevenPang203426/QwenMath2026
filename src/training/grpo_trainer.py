@@ -152,6 +152,10 @@ def train_grpo(config_path: str) -> None:
         "temperature": grpo_cfg.temperature,
         "top_p": getattr(grpo_cfg, "top_p", 1.0),
         "report_to": "wandb",
+        # 加速参数
+        "use_vllm": getattr(grpo_cfg, "use_vllm", False),
+        "dataloader_num_workers": getattr(config.training, "dataloader_num_workers", 0),
+        "max_grad_norm": getattr(config.training, "max_grad_norm", 1.0),
     }
     grpo_config = GRPOConfig(**filter_supported_kwargs(GRPOConfig, grpo_kwargs))
 

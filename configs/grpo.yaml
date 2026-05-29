@@ -12,12 +12,13 @@ model:
   sft_checkpoint: "outputs/checkpoints/sft_cot/best"
 
 grpo:
-  num_generations: 16                    # 28GB 显存 + 0.5B 模型，16 个采样保证 advantage 稳定
-  max_new_tokens: 512
+  num_generations: 8                     # 从 16 降到 8，0.5B 模型足够稳定，省一半 generation 时间
+  max_new_tokens: 256                    # CoT 中位数 79 字符 ≈ 40 token，256 绰绰有余
   temperature: 0.8                       # 稍高温度增加探索多样性
   top_p: 0.95
   max_prompt_length: 256
-  max_completion_length: 512
+  max_completion_length: 256             # 同步降低，与 max_new_tokens 一致
+  use_vllm: true                         # TRL 1.4 原生 vLLM 加速 generation
 
 # 奖励函数由 src/models/reward.py 的 build_reward_funcs() 构建
 # 5 个独立函数，TRL 自动求和 + 分维度日志
@@ -32,13 +33,15 @@ grpo:
 training:
   output_dir: "outputs/checkpoints/grpo"
   num_train_epochs: 1
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 8
+  per_device_train_batch_size: 8         # 2→8，32GB 显存充裕，0.5B 模型 batch=8 约用 12-15GB
+  gradient_accumulation_steps: 2         # 8→2，effective batch=16 不变，但步数减少 4x
+  gradient_checkpointing: false          # 关闭，用显存换速度（32GB 足够）
   learning_rate: 5.0e-6                  # 保守学习率，防止推理能力退化
   warmup_ratio: 0.1
   lr_scheduler_type: "cosine"
-  save_steps: 200
-  eval_steps: 200
+  dataloader_num_workers: 4              # 数据加载并行
+  save_steps: 100
+  eval_steps: 100
   max_grad_norm: 0.1                     # 激进梯度裁剪，稳定训练
 
 logging:
