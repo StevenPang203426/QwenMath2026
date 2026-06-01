@@ -94,6 +94,46 @@ def _sanitize_question(q) -> str:
     return q.strip().strip('"')
 
 
+def _record_sort_key(item: dict) -> tuple[int, object]:
+    item_id = str(item.get("id", ""))
+    return (0, int(item_id)) if item_id.isdigit() else (1, item_id)
+
+
+def _load_json_records(path: str) -> list[dict]:
+    """Load either pretty JSON arrays or legacy JSONL records."""
+    if not os.path.exists(path):
+        return []
+
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    if not content:
+        return []
+
+    try:
+        data = json.loads(content)
+        return data if isinstance(data, list) else [data]
+    except json.JSONDecodeError:
+        records = []
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.warning(f"跳过无法解析的 JSON 行: {line[:80]}")
+        return records
+
+
+def _save_json_records(path: str, records: list[dict]) -> None:
+    """Write records as readable, indented JSON."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    records = sorted(records, key=_record_sort_key)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
 def _normalize_answer(s: str) -> Optional[float]:
     if not s:
         return None
@@ -279,22 +319,17 @@ def build_expr_dataset(
 
     logger.info(f"数据总量: {len(data)}, 模式: {'错误表达式' if generate_wrong else '正确表达式'}")
 
-    # 断点续传：加载已有结果
+    # 断点续传：兼容新版缩进 JSON 数组和旧版 JSONL
     existing = {}
-    if resume and os.path.exists(output_path):
-        with open(output_path, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    item = json.loads(line.strip())
-                    existing[item["id"]] = item
-                except (json.JSONDecodeError, KeyError):
-                    continue
-        logger.info(f"已有结果: {len(existing)} 条，将跳过")
+    if resume:
+        existing = {item["id"]: item for item in _load_json_records(output_path) if "id" in item}
+        if existing:
+            logger.info(f"已有结果: {len(existing)} 条，将跳过")
 
     # 按 prompt 类型排序（提高缓存命中率）
     # 正样本和负样本分开调用，prompt 前缀固定 → 缓存命中率高
     client = _get_client(api_key)
-    out_f = open(output_path, "a", encoding="utf-8")
+    results = dict(existing)
 
     processed = 0
     success = 0
@@ -356,8 +391,8 @@ def build_expr_dataset(
                 processed += 1
                 if result.get("status") == "ok":
                     success += 1
-                out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                out_f.flush()
+                results[result["id"]] = result
+                _save_json_records(output_path, list(results.values()))
 
                 if processed % 100 == 0:
                     total = processed + skipped
@@ -368,7 +403,7 @@ def build_expr_dataset(
             except Exception as e:
                 logger.error(f"处理失败: {e}")
 
-    out_f.close()
+    _save_json_records(output_path, list(results.values()))
     logger.info(
         f"完成! 新处理: {processed}, 成功: {success}, "
         f"成功率: {success/processed*100:.1f}%" if processed > 0 else "无新数据"
@@ -385,16 +420,14 @@ def convert_to_sft_format(
     只保留 valid=True 的正确表达式
     """
     items = []
-    with open(expr_jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            item = json.loads(line.strip())
-            if item.get("valid") and item.get("status") == "ok":
-                items.append({
-                    "id": item["id"],
-                    "question": item["question"],
-                    "expression": item["expression"],
-                    "answer": item["answer"],
-                })
+    for item in _load_json_records(expr_jsonl_path):
+        if item.get("valid") and item.get("status") == "ok":
+            items.append({
+                "id": item["id"],
+                "question": item["question"],
+                "expression": item["expression"],
+                "answer": item["answer"],
+            })
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
@@ -413,24 +446,20 @@ def convert_to_dpo_format(
     配对规则：同 id 的正确表达式做 chosen，错误表达式做 rejected
     """
     correct = {}
-    with open(correct_jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            item = json.loads(line.strip())
-            if item.get("valid") and item.get("status") == "ok":
-                correct[item["id"]] = item
+    for item in _load_json_records(correct_jsonl_path):
+        if item.get("valid") and item.get("status") == "ok":
+            correct[item["id"]] = item
 
     pairs = []
-    with open(wrong_jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            item = json.loads(line.strip())
-            item_id = item["id"]
-            if item_id in correct and item.get("status") == "ok":
-                pairs.append({
-                    "id": item_id,
-                    "question": correct[item_id]["question"],
-                    "chosen": f"<expr>{correct[item_id]['expression']}</expr><answer>{correct[item_id]['answer']}</answer>",
-                    "rejected": f"<expr>{item['expression']}</expr><answer>{item.get('eval_result', '')}</answer>",
-                })
+    for item in _load_json_records(wrong_jsonl_path):
+        item_id = item["id"]
+        if item_id in correct and item.get("status") == "ok":
+            pairs.append({
+                "id": item_id,
+                "question": correct[item_id]["question"],
+                "chosen": f"<expr>{correct[item_id]['expression']}</expr><answer>{correct[item_id]['answer']}</answer>",
+                "rejected": f"<expr>{item['expression']}</expr><answer>{item.get('eval_result', '')}</answer>",
+            })
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(pairs, f, ensure_ascii=False, indent=2)
