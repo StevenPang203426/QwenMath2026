@@ -20,6 +20,7 @@ logger = logging.getLogger("math_solver.expr_builder")
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
+MAX_REPAIR_ATTEMPTS = 3
 
 
 # ============================================================
@@ -284,6 +285,35 @@ def verify_expression(expr_str: str, gold_answer: str) -> dict:
         return {"valid": False, "eval_result": result_str, "error": f"mismatch: eval={result_str}, gold={gold_answer}"}
 
 
+def _is_compliant_expr_record(item: dict, generate_wrong: bool) -> bool:
+    """Return whether an existing expression record is safe to reuse."""
+    if item.get("status") != "ok":
+        return False
+    if not item.get("expression"):
+        return False
+    if generate_wrong:
+        return item.get("valid") is False and item.get("eval_result") is not None
+    return item.get("valid") is True
+
+
+def _repair_reason(item: dict | None, generate_wrong: bool) -> str:
+    if item is None:
+        return "missing"
+    if not item.get("expression"):
+        return "empty_expression"
+    if item.get("status") == "api_failed":
+        return "api_failed"
+    if generate_wrong:
+        if item.get("status") == "accidentally_correct" or item.get("valid") is True:
+            return "wrong_accidentally_correct"
+        if item.get("status") == "unparseable" or item.get("eval_result") is None:
+            return "wrong_unparseable"
+        return "wrong_invalid"
+    if item.get("valid") is not True:
+        return "correct_invalid"
+    return "invalid_status"
+
+
 # ============================================================
 # 主流程
 # ============================================================
@@ -319,12 +349,27 @@ def build_expr_dataset(
 
     logger.info(f"数据总量: {len(data)}, 模式: {'错误表达式' if generate_wrong else '正确表达式'}")
 
-    # 断点续传：兼容新版缩进 JSON 数组和旧版 JSONL
+    # 断点续传：只跳过合规数据，不合规数据默认进入修复队列
     existing = {}
+    reusable = {}
+    repair_reasons = {}
     if resume:
         existing = {item["id"]: item for item in _load_json_records(output_path) if "id" in item}
         if existing:
-            logger.info(f"已有结果: {len(existing)} 条，将跳过")
+            reusable = {
+                item_id: item
+                for item_id, item in existing.items()
+                if _is_compliant_expr_record(item, generate_wrong)
+            }
+            repair_reasons = {
+                item_id: _repair_reason(item, generate_wrong)
+                for item_id, item in existing.items()
+                if item_id not in reusable
+            }
+            logger.info(
+                f"已有结果: {len(existing)} 条，合规跳过: {len(reusable)} 条，"
+                f"需重算: {len(repair_reasons)} 条"
+            )
 
     # 按 prompt 类型排序（提高缓存命中率）
     # 正样本和负样本分开调用，prompt 前缀固定 → 缓存命中率高
@@ -333,51 +378,68 @@ def build_expr_dataset(
 
     processed = 0
     success = 0
-    skipped = len(existing)
+    skipped = len(reusable)
 
     def process_item(item):
         item_id = item["id"]
-        if item_id in existing:
+        if item_id in reusable:
             return None
 
         question = item["question"]
         gold_answer = str(item["answer"])
+        initial_reason = repair_reasons.get(item_id, "missing")
+        last_output = None
 
-        result = _call_expr_api(
-            question=question,
-            client=client,
-            model=model,
-            generate_wrong=generate_wrong,
-        )
+        for attempt in range(1, MAX_REPAIR_ATTEMPTS + 1):
+            result = _call_expr_api(
+                question=question,
+                client=client,
+                model=model,
+                generate_wrong=generate_wrong,
+            )
 
-        if result is None:
-            return {"id": item_id, "status": "api_failed"}
-
-        expr = result["expression"]
-        verification = verify_expression(expr, gold_answer)
-
-        output = {
-            "id": item_id,
-            "question": _sanitize_question(question),
-            "answer": gold_answer,
-            "expression": expr,
-            "eval_result": verification["eval_result"],
-            "valid": verification["valid"],
-            "error": verification["error"],
-            "status": "ok" if verification["valid"] else "eval_mismatch",
-        }
-
-        # 对于错误表达式模式：valid=False 反而是我们想要的
-        if generate_wrong:
-            # 错误表达式需要：可解析但结果不对
-            if verification["error"] and "eval_failed" in verification["error"]:
-                output["status"] = "unparseable"
-            elif verification["valid"]:
-                output["status"] = "accidentally_correct"
+            if result is None:
+                last_output = {
+                    "id": item_id,
+                    "question": _sanitize_question(question),
+                    "answer": gold_answer,
+                    "expression": "",
+                    "eval_result": None,
+                    "valid": False,
+                    "error": "api_failed",
+                    "status": "api_failed",
+                }
             else:
-                output["status"] = "ok"
+                expr = result["expression"]
+                verification = verify_expression(expr, gold_answer)
 
-        return output
+                last_output = {
+                    "id": item_id,
+                    "question": _sanitize_question(question),
+                    "answer": gold_answer,
+                    "expression": expr,
+                    "eval_result": verification["eval_result"],
+                    "valid": verification["valid"],
+                    "error": verification["error"],
+                    "status": "ok" if verification["valid"] else "eval_mismatch",
+                }
+
+                # 对于错误表达式模式：valid=False 且可解析才是合规负样本
+                if generate_wrong:
+                    if verification["error"] and "eval_failed" in verification["error"]:
+                        last_output["status"] = "unparseable"
+                    elif verification["valid"]:
+                        last_output["status"] = "accidentally_correct"
+                    else:
+                        last_output["status"] = "ok"
+
+            last_output["attempts"] = attempt
+            last_output["repair_reason"] = initial_reason
+            if _is_compliant_expr_record(last_output, generate_wrong):
+                return last_output
+            last_output["repair_reason"] = _repair_reason(last_output, generate_wrong)
+
+        return last_output
 
     # 并发执行
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
