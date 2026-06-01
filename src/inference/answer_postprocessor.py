@@ -281,6 +281,10 @@ def postprocess_answer(raw_answer: str, question: str) -> str:
     # 基础清理：去除换行、单位、LaTeX
     answer = _basic_clean(raw_answer)
 
+    # 如果原始答案含日期格式（X月Y日），清理后变成 X/Y，直接返回不做数值解析
+    if re.search(r'\d+\s*月\s*\d+', raw_answer):
+        return _final_clean(answer)
+
     # 检测答案类型
     answer_type, param = detect_answer_type(question)
 
