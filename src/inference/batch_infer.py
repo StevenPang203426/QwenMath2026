@@ -12,11 +12,52 @@ from typing import Optional
 from src.models.model_loader import load_model_and_tokenizer, load_peft_model
 from src.inference.predictor import MathPredictor
 from src.inference.cot_prompting import build_zero_shot_prompt, build_few_shot_prompt
+from src.inference.answer_postprocessor import postprocess_answer
+from src.inference.question_classifier import build_adaptive_prompt
 from src.data.answer_extractor import extract_answer, batch_extract
 from src.utils.config import load_config
 from src.utils.seed import set_seed
 
 logger = logging.getLogger("math_solver.batch_infer")
+
+
+def _postprocess_answer(answer: str) -> str:
+    """
+    提交答案后处理：去除特殊字符，统一格式
+
+    规则：
+    1. 去除换行、多余空格
+    2. 中文日期 → 分数格式（如 "4月5日" → "4/5"）
+    3. 去除残留中文单位
+    4. 去除 LaTeX 残留
+    """
+    import re
+
+    answer = answer.replace("\n", " ").strip()
+
+    # 中文日期格式转分数：X月Y日 → X/Y
+    answer = re.sub(r'(\d+)\s*月\s*(\d+)\s*日?', r'\1/\2', answer)
+
+    # 去除残留中文单位（不影响数字本身）
+    units = [
+        "千克", "公斤", "克", "吨", "米", "厘米", "毫米", "千米", "公里",
+        "平方米", "平方厘米", "立方米", "元", "角", "分", "块",
+        "个", "只", "条", "本", "台", "辆", "棵", "支", "张", "把",
+        "小时", "分钟", "秒", "天", "年", "月", "周",
+        "人", "名", "位", "双", "对", "箱", "盒", "包", "瓶", "页",
+        "km", "m", "cm", "mm", "kg", "g",
+    ]
+    for unit in units:
+        answer = answer.replace(unit, "")
+
+    # 去除 LaTeX 残留
+    answer = re.sub(r'\\[a-zA-Z]+', '', answer)
+    answer = re.sub(r'[{}$]', '', answer)
+
+    # 最终清理
+    answer = answer.strip()
+
+    return answer
 
 
 def _resolve_checkpoint_path(adapter_path: str) -> str | None:
@@ -101,18 +142,29 @@ def run_inference(config_path: str) -> str:
         test_data = json.load(f)
     logger.info(f"测试集大小: {len(test_data)}")
 
+    # 基础 instruction（用于自适应 prompt）
+    base_instruction = (
+        "请一步一步思考，然后给出数字答案。"
+        "用<think></think>标签包裹推理过程，用<answer></answer>标签包裹最终数字答案。"
+    )
+
     # 批量推理
     results = []
     for item in tqdm(test_data, desc=f"推理 [{active_method}]"):
         question = item["question"]
+        # 将 question 统一为字符串
+        if isinstance(question, list):
+            question_text = question[0].get("content", "") if question else ""
+        else:
+            question_text = str(question)
 
         # 方案1 特殊处理：CoT 提示工程（不微调）
         if active_method == "cot_prompt":
             strategy = getattr(method_cfg, "cot_strategy", "few_shot")
             if strategy == "few_shot":
-                messages = build_few_shot_prompt(question)
+                messages = build_few_shot_prompt(question_text)
             else:
-                messages = build_zero_shot_prompt(question)
+                messages = build_zero_shot_prompt(question_text)
 
             # 直接用 messages 推理
             text = tokenizer.apply_chat_template(
@@ -134,14 +186,19 @@ def run_inference(config_path: str) -> str:
                 "id": item["id"],
                 "raw_output": raw_output,
                 "answer": answer,
+                "question_text": question_text,
             })
         else:
-            # 其他方案：使用统一预测器
+            # 其他方案：使用统一预测器 + 自适应 prompt
+            adaptive_instruction = build_adaptive_prompt(
+                question_text, base_instruction
+            )
             result = predictor.predict_single(
-                question=question,
-                instruction=item.get("instruction"),
+                question=question_text,
+                instruction=adaptive_instruction,
             )
             result["id"] = item["id"]
+            result["question_text"] = question_text
             results.append(result)
 
     # 生成 submit.csv
@@ -154,10 +211,10 @@ def run_inference(config_path: str) -> str:
 
     with open(output_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["id", "ret"])
         for r in results:
-            # 清理答案：去除换行等
-            answer = str(r["answer"]).replace("\n", " ").strip()
+            # 使用上下文感知的后处理��传入原始题目）
+            q_text = r.get("question_text", "")
+            answer = postprocess_answer(str(r["answer"]), q_text)
             writer.writerow([r["id"], answer])
 
     logger.info(f"提交文件已生成: {output_path}")
