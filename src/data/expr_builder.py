@@ -529,6 +529,66 @@ def convert_to_dpo_format(
     logger.info(f"DPO 偏好对: {len(pairs)} 条 → {output_path}")
 
 
+def export_failed_to_candidates(
+    correct_path: str,
+    wrong_path: str,
+    output_path: str,
+    raw_data_path: str = "data/raw/train.json",
+) -> None:
+    """
+    导出 3 次重算仍失败的记录到 quality_candidates.json
+
+    供 quality_auditor 统一审计。收集以下信号：
+    - correct 模式下 valid != True 的记录
+    - wrong 模式下多次生成仍 accidentally_correct 或 unparseable 的记录
+    - 两个模式的交集（同一题在两个模式都失败 → 高概率是题目本身有问题）
+    """
+    with open(raw_data_path, "r", encoding="utf-8") as f:
+        raw_data = {item["id"]: item for item in json.load(f)}
+
+    correct_failed = {}
+    for item in _load_json_records(correct_path):
+        if not _is_compliant_expr_record(item, generate_wrong=False):
+            correct_failed[item["id"]] = item
+
+    wrong_failed = {}
+    for item in _load_json_records(wrong_path):
+        if not _is_compliant_expr_record(item, generate_wrong=True):
+            wrong_failed[item["id"]] = item
+
+    # 合并：取并集
+    all_failed_ids = set(correct_failed.keys()) | set(wrong_failed.keys())
+    both_failed_ids = set(correct_failed.keys()) & set(wrong_failed.keys())
+
+    candidates = []
+    for item_id in sorted(all_failed_ids, key=lambda x: int(x) if str(x).isdigit() else 0):
+        raw = raw_data.get(item_id, {})
+        signals = []
+        if item_id in correct_failed:
+            reason = correct_failed[item_id].get("repair_reason", "unknown")
+            signals.append(f"expr_correct_failed:{reason}")
+        if item_id in wrong_failed:
+            reason = wrong_failed[item_id].get("repair_reason", "unknown")
+            signals.append(f"expr_wrong_failed:{reason}")
+        if item_id in both_failed_ids:
+            signals.append("both_modes_failed")
+
+        candidates.append({
+            "id": item_id,
+            "question": raw.get("question", ""),
+            "answer": str(raw.get("answer", "")),
+            "signals": signals,
+            "risk_score": 0.9 if item_id in both_failed_ids else 0.7,
+        })
+
+    _save_json_records(output_path, candidates)
+    logger.info(
+        f"导出审计候选: {len(candidates)} 条 → {output_path} "
+        f"(correct 失败: {len(correct_failed)}, wrong 失败: {len(wrong_failed)}, "
+        f"两模式都失败: {len(both_failed_ids)})"
+    )
+
+
 # ============================================================
 # CLI
 # ============================================================
@@ -539,10 +599,11 @@ if __name__ == "__main__":
 
     if len(sys.argv) < 2:
         print("用法:")
-        print("  生成正确表达式: python -m src.data.expr_builder correct <api_key> [--limit N]")
-        print("  生成错误表达式: python -m src.data.expr_builder wrong <api_key> [--limit N]")
-        print("  转换 SFT 数据:  python -m src.data.expr_builder convert_sft")
-        print("  转换 DPO 数据:  python -m src.data.expr_builder convert_dpo")
+        print("  生成正确表达式:  python -m src.data.expr_builder correct <api_key> [--limit N]")
+        print("  生成错误表达式:  python -m src.data.expr_builder wrong <api_key> [--limit N]")
+        print("  转换 SFT 数据:   python -m src.data.expr_builder convert_sft")
+        print("  转换 DPO 数据:   python -m src.data.expr_builder convert_dpo")
+        print("  导出审计候选:    python -m src.data.expr_builder export_failed")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -583,6 +644,12 @@ if __name__ == "__main__":
             "data/processed/expr_correct.jsonl",
             "data/processed/expr_wrong.jsonl",
             "data/processed/train_expr_dpo.json",
+        )
+    elif mode == "export_failed":
+        export_failed_to_candidates(
+            correct_path="data/processed/expr_correct.jsonl",
+            wrong_path="data/processed/expr_wrong.jsonl",
+            output_path="data/processed/quality_candidates.json",
         )
     else:
         print(f"未知模式: {mode}")

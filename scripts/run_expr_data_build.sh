@@ -7,6 +7,7 @@
 #   小批量测试:      bash scripts/run_expr_data_build.sh correct <api_key> 50
 #   转换 SFT 数据:   bash scripts/run_expr_data_build.sh convert_sft
 #   转换 DPO 数据:   bash scripts/run_expr_data_build.sh convert_dpo
+#   导出审计候选:    bash scripts/run_expr_data_build.sh export_failed
 # ============================================================
 set -e
 
@@ -43,9 +44,14 @@ elif [ "$MODE" = "convert_dpo" ]; then
     python -m src.data.expr_builder convert_dpo
     echo "DPO 数据已生成: data/processed/train_expr_dpo.json"
 
+elif [ "$MODE" = "export_failed" ]; then
+    python -m src.data.expr_builder export_failed
+    echo "审计候选已导出: data/processed/quality_candidates.json"
+    echo "下一步: bash scripts/run_quality_audit.sh"
+
 else
     echo "未知模式: $MODE"
-    echo "可选: correct | wrong | convert_sft | convert_dpo"
+    echo "可选: correct | wrong | convert_sft | convert_dpo | export_failed"
     exit 1
 fi
 
