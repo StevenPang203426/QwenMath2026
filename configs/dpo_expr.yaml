@@ -1,0 +1,32 @@
+# ============================================================
+# dpo_expr.yaml — 表达式方案 DPO 训练
+# ============================================================
+inherit: base
+
+data:
+  train_path: "data/processed/train_expr_dpo.json"
+
+model:
+  sft_checkpoint: "outputs/checkpoints/sft_expr_safe/best"
+
+dpo:
+  beta: 0.1
+  loss_type: "sigmoid"
+  max_length: 512
+  max_prompt_length: 256
+
+training:
+  output_dir: "outputs/checkpoints/dpo_expr"
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-6
+  warmup_ratio: 0.1
+  lr_scheduler_type: "cosine"
+  save_steps: 100
+  eval_steps: 100
+  gradient_checkpointing: false
+
+logging:
+  run_name: "dpo-expr"
+  tags: ["dpo", "expression"]

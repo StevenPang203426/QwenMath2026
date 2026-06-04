@@ -16,6 +16,7 @@ from typing import Optional
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from src.utils.expression_policy import validate_expression
 from src.utils.answer_normalizer import (
     answers_match as _normalized_answers_match,
     answers_match_by_question,
@@ -269,8 +270,16 @@ def verify_expression(expr_str: str, gold_answer: str, question: str = "") -> di
     if not expr_str:
         return {"valid": False, "eval_result": None, "error": "empty_expression"}
 
+    policy = validate_expression(expr_str)
+    if not policy.ok:
+        return {
+            "valid": False,
+            "eval_result": None,
+            "error": f"policy_violation: {','.join(policy.reasons)}",
+        }
+
     # 预处理：替换 ^ 为 **，× 为 *，÷ 为 /
-    expr_clean = expr_str.replace('^', '**').replace('×', '*').replace('÷', '/')
+    expr_clean = policy.normalized.replace('^', '**').replace('×', '*').replace('÷', '/')
 
     try:
         result = safe_eval(expr_clean)
@@ -524,6 +533,10 @@ def convert_to_dpo_format(
             pairs.append({
                 "id": item_id,
                 "question": correct[item_id]["question"],
+                "instruction": (
+                    "请为以下数学题写出一个Python可直接计算的中缀数学表达式。"
+                    "用<expr></expr>标签包裹表达式，用<answer></answer>标签包裹计算结果。"
+                ),
                 "chosen": f"<expr>{correct[item_id]['expression']}</expr><answer>{correct[item_id]['answer']}</answer>",
                 "rejected": f"<expr>{item['expression']}</expr><answer>{item.get('eval_result', '')}</answer>",
             })

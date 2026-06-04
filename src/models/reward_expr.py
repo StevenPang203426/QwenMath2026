@@ -13,7 +13,8 @@ import re
 from typing import Optional
 
 from src.data.expr_builder import safe_eval, _sanitize_question
-from src.utils.metrics import normalize_number
+from src.utils.answer_normalizer import answers_match_by_question, format_auto
+from src.utils.expression_policy import validate_expression
 
 # 非法字符模式：中文、英文字母（运算符 e 除外）、LaTeX 命令
 _ILLEGAL_CHARS = re.compile(r'[一-鿿]|\\[a-zA-Z]|[a-df-zA-DF-Z]')
@@ -42,18 +43,32 @@ def _try_eval(expr_str: str) -> Optional[float]:
     """尝试 safe_eval，失败返回 None"""
     if not expr_str:
         return None
+    policy = validate_expression(expr_str)
+    if not policy.ok:
+        return None
     try:
-        expr_clean = expr_str.replace('^', '**').replace('×', '*').replace('÷', '/')
+        expr_clean = policy.normalized.replace('^', '**').replace('×', '*').replace('÷', '/')
         return safe_eval(expr_clean)
     except Exception:
         return None
+
+
+def _question_for_index(prompt, i: int) -> str:
+    if prompt is None:
+        return ""
+    source = prompt[i] if isinstance(prompt, list) and i < len(prompt) else prompt
+    if isinstance(source, list):
+        for msg in source:
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                return str(msg.get("content", ""))
+    return str(source)
 
 
 # ============================================================
 # 奖励函数 1: eval 正确性（-0.5 ~ +1.0）
 # ============================================================
 
-def expr_correctness_fn(completions, answer=None, **kwargs):
+def expr_correctness_fn(completions, answer=None, prompt=None, **kwargs):
     """
     eval(表达式) 与 gold answer 匹配
 
@@ -77,11 +92,10 @@ def expr_correctness_fn(completions, answer=None, **kwargs):
             rewards.append(-0.5)
             continue
 
-        result_str = str(int(result)) if result == int(result) else str(result)
-        gold_norm = normalize_number(str(gold))
-        pred_norm = normalize_number(result_str)
+        result_str = format_auto(result)
+        question = _question_for_index(prompt, i)
 
-        if pred_norm is not None and gold_norm is not None and pred_norm == gold_norm:
+        if answers_match_by_question(result_str, gold, question):
             rewards.append(1.0)
         else:
             rewards.append(-0.5)
@@ -148,7 +162,8 @@ def expr_clean_fn(completions, **kwargs):
     for comp in completions:
         text = _extract_text(comp)
         expr = _extract_expr_tag(text)
-        if expr and _ILLEGAL_CHARS.search(expr):
+        policy = validate_expression(expr) if expr else None
+        if policy is not None and not policy.ok:
             rewards.append(-0.3)
         else:
             rewards.append(0.0)

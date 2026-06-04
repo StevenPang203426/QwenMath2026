@@ -1,5 +1,5 @@
 # ============================================================
-# grpo_expr.yaml — 表达式方案 GRPO 训练
+# grpo_expr_from_dpo.yaml — 表达式方案 DPO→GRPO 训练
 # 四维奖励：eval正确性 / 可解析性 / 格式标签 / 无非法字符
 # ============================================================
 inherit: base
@@ -8,7 +8,7 @@ data:
   train_path: "data/raw/train.json"
 
 model:
-  sft_checkpoint: "outputs/checkpoints/sft_expr_safe/best"
+  sft_checkpoint: "outputs/checkpoints/dpo_expr/best"
 
 grpo:
   num_generations: 8
@@ -29,7 +29,7 @@ grpo:
 # 理论总分：-1.1 ~ +1.5
 
 training:
-  output_dir: "outputs/checkpoints/grpo_expr"
+  output_dir: "outputs/checkpoints/grpo_expr_from_dpo"
   num_train_epochs: 1
   per_device_train_batch_size: 8
   gradient_accumulation_steps: 2
@@ -43,5 +43,5 @@ training:
   max_grad_norm: 0.1
 
 logging:
-  run_name: "grpo-expr-4reward"
-  tags: ["grpo", "expression", "4-reward"]
+  run_name: "grpo-expr-from-dpo-4reward"
+  tags: ["grpo", "expression", "dpo-init", "4-reward"]

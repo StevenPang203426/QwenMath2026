@@ -49,6 +49,7 @@ data/raw/*.csv
 data/processed/*.json
 data/processed/*.jsonl
 data/processed/test/
+data/processed/intermediate/
 data/splits/*.json
 
 # 保留目录结构的 .gitkeep
