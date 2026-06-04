@@ -526,6 +526,44 @@ python -m py_compile src/data/expr_builder.py
 
 ---
 
+## 34. 规则增强禁替换常数黑名单
+
+**背景：** `rule_augmentor.py` 做数字替换增强时，某些常数不能被替换，否则会破坏题意。例如 "圆周率取 3.14" 中的 3.14、"一年有 12 个月" 中的 12。
+
+**解决：** 在 `src/data/rule_augmentor.py` 中新增 `_FROZEN_NUMBERS` 黑名单集合：
+
+```
+3.14, 0, 1, 2, 7, 10, 12, 24, 30, 60, 100, 180, 360, 365, 1000
+```
+
+在 `_augment_one()` 中过滤掉黑名单数字，只替换题目特有的数值。
+
+---
+
+## 35. expr_builder 失败记录自动导出审计候选
+
+**背景：** `expr_builder.py` 3 次重算仍失败的记录，高概率是题目本身有问题（歧义、OCR 错误、标注错误）。需要自动导出到 `quality_candidates.json`，供 `quality_auditor.py` 统一审计。
+
+**解决：** 在 `src/data/expr_builder.py` 中新增 `export_failed_to_candidates()` 函数：
+
+- 收集 correct 和 wrong 两个模式中 3 次重算仍不合规的记录
+- 两个模式都失败的题目 risk_score=0.9（高概率题目有问题）
+- 仅单模式失败的题目 risk_score=0.7
+- 新增 CLI 命令 `export_failed`
+
+**运行命令：**
+```bash
+python -m src.data.expr_builder export_failed
+# 或
+bash scripts/run_expr_data_build.sh export_failed
+```
+
+**输出文件：** `data/processed/quality_candidates.json`
+
+**下游流程：** `quality_auditor.py` 读取候选 → 大模型审计 → 高门槛修复
+
+---
+
 ## 待解决 / 后续计划
 
 | 编号 | 事项 | 状态 |
@@ -536,7 +574,12 @@ python -m py_compile src/data/expr_builder.py
 | 4 | 考虑 SiliconFlow 免费 API（Qwen3-8B） | 待决策 |
 | 5 | CoT SFT 训练 | 待执行 |
 | 6 | DPO 训练（偏好对数据） | 待执行 |
-| 7 | GRPO 训练 | 待执行 |
+| 7 | GRPO 训练 | 进行中 |
 | 8 | 全部方案推理+提交 | 待执行 |
 | 9 | 课程报告撰写 | 待执行 |
 | 10 | 失败数据修复（data_repair.py） | 进行中 |
+| 11 | 表达式数据构建 | 进行中 |
+| 12 | 表达式 SFT + GRPO 训练 | 待执行 |
+| 13 | 数据质量审计（quality_auditor） | 待执行 |
+| 14 | 规则数据增强（rule_augmentor） | 待执行 |
+| 15 | 4 模型投票推理 | 待执行 |
