@@ -36,21 +36,64 @@ AUDIT_LABELS = {
 }
 AUTO_REPAIR_LABELS = {"ocr_error", "missing_symbol", "wrong_answer"}
 
-_AUDIT_SYSTEM_PROMPT = """
-你是小学数学题数据质量审计员。请判断题目是否清晰、标注答案是否可信、是否存在 OCR 或漏符号问题。
+_AUDIT_SYSTEM_PROMPT = "你是小学数学题数据质量审计员。严格按用户消息中的固定规则审计，只输出 JSON。"
 
-只输出 JSON，不要输出解释性正文。JSON 字段：
+# DeepSeek context cache only matches persisted input prefixes. Keep the full
+# rubric in the user message before the per-question JSON so consecutive audit
+# calls share a long, identical prefix.
+_AUDIT_CACHE_PREFIX = """
+你正在审计 CCF BDCI 小学数学应用题训练数据。任务是判断题目是否清晰、标注答案是否可信、是否存在 OCR 或漏符号问题。
+
+【输入说明】
+每次请求最后都会给出一个候选题目 JSON，字段含义固定：
+- id: 原始题目编号
+- question: 题干，可能包含 OCR 残留、缺失符号或歧义表达
+- answer: 当前标注答案，可能正确也可能错误
+- signals: 规则预筛信号，例如 expr_correct_failed、cot_answer_disagreement、suspected_ocr_fraction、suspected_missing_percent、possible_ambiguity、empty_answer
+- risk_score: 规则预筛风险分数，只作为参考，不要机械服从
+
+【输出要求】
+只输出一个 JSON 对象，不要输出 Markdown，不要输出解释性正文，不要包裹代码块。JSON 必须包含以下字段：
 - label: ok | ambiguous | ocr_error | missing_symbol | wrong_answer | unsolvable | needs_human
 - confidence: 0 到 1 的数字
 - reason: 简短中文原因
-- can_auto_repair: true/false
+- can_auto_repair: true 或 false
 - repaired_question: 如果能高置信修复，给修复后的题干，否则空字符串
 - repaired_answer: 如果能高置信修复，给修复后的答案，否则空字符串
 - repair_expression: 如果能高置信修复，给 Python 可计算表达式，否则空字符串
 
-自动修复必须非常保守：只有明显 OCR 错、漏百分号/分数线/小数点、或标注答案明显错时才修复。
-如果不确定，label 用 needs_human，can_auto_repair=false。
+【标签定义】
+- ok: 题目清晰，标注答案可信，不需要修复
+- ambiguous: 题意有歧义，存在多个合理解释
+- ocr_error: 题干明显有 OCR 识别错误，例如分数线丢失、数字粘连、字符错识别
+- missing_symbol: 题干明显漏了百分号、小数点、分数线、括号等关键符号
+- wrong_answer: 题干清晰，但标注答案明显错误
+- unsolvable: 信息不足、条件矛盾或无法唯一求解
+- needs_human: 不能高置信判断，或修复会改变题目核心含义
+
+【自动修复原则】
+自动修复必须非常保守。只有明显 OCR 错、漏百分号/分数线/小数点、或标注答案明显错时才允许 can_auto_repair=true。
+如果只是模型表达式生成失败，不能直接判定题目错误。
+如果修复需要猜测题意，必须 label=needs_human 或 ambiguous，can_auto_repair=false。
+如果题目可解但当前 signals 只是模型生成不稳定，通常 label=ok 或 needs_human。
+
+【修复写回门槛】
+当 can_auto_repair=true 时，必须同时给出 repaired_question、repaired_answer、repair_expression。
+repair_expression 必须是 Python 可直接计算的纯数学表达式，只允许数字和 + - * / ** ( )，不要使用变量、中文、单位、函数或 LaTeX。
+repair_expression 的计算结果必须与 repaired_answer 一致。
+修复后的题干只能修正明显字符/符号/标注问题，不得更换题型或重新创作新题。
+
+【判断细节】
+百分率、合格率、成活率、发芽率、命中率等通常要求百分数答案。
+几分之几、分率、占比、比例、比重等通常要求分数答案。
+至少、最少、起码并搭配车辆、船、箱、人等离散量时，通常需要向上取整。
+至多、最多、顶多并搭配能、可以、装、分、做、买等语义时，通常需要向下取整。
+圆周率按 3.14 处理。单位不要写进 repaired_answer。
+
+下面是候选题目 JSON。请只根据固定规则和该 JSON 审计：
 """.strip()
+
+_AUDIT_CANDIDATE_SEPARATOR = "\n\n【候选题目 JSON】\n"
 
 
 def _get_client(api_key: str):
@@ -176,18 +219,59 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def _call_audit_api(candidate: dict, client, model: str, max_retries: int = 3) -> dict:
-    user_payload = {
+def _candidate_payload(candidate: dict) -> dict:
+    """Return the dynamic candidate payload kept after the cacheable prefix."""
+    return {
         "id": candidate["id"],
         "question": candidate["question"],
         "answer": candidate["answer"],
         "signals": candidate.get("signals", []),
         "risk_score": candidate.get("risk_score", 0),
     }
-    messages = [
+
+
+def _build_audit_messages(candidate: dict) -> list[dict[str, Any]]:
+    """Build a cache-friendly DeepSeek chat request for one audit candidate."""
+    user_text = (
+        _AUDIT_CACHE_PREFIX
+        + _AUDIT_CANDIDATE_SEPARATOR
+        + json.dumps(
+            _candidate_payload(candidate),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return [
         {"role": "system", "content": _AUDIT_SYSTEM_PROMPT},
-        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        {"role": "user", "content": [{"type": "text", "text": user_text}]},
     ]
+
+
+def _record_cache_usage(resp, cache_stats: dict[str, int] | None) -> None:
+    """Accumulate DeepSeek prompt cache hit/miss tokens from a response."""
+    if cache_stats is None:
+        return
+    usage = getattr(resp, "usage", None)
+    if isinstance(usage, dict):
+        hit = usage.get("prompt_cache_hit_tokens", 0) or 0
+        miss = usage.get("prompt_cache_miss_tokens", 0) or 0
+    else:
+        hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+        miss = getattr(usage, "prompt_cache_miss_tokens", 0) or 0
+    cache_stats["requests"] = cache_stats.get("requests", 0) + 1
+    cache_stats["hit_tokens"] = cache_stats.get("hit_tokens", 0) + int(hit)
+    cache_stats["miss_tokens"] = cache_stats.get("miss_tokens", 0) + int(miss)
+
+
+def _call_audit_api(
+    candidate: dict,
+    client,
+    model: str,
+    max_retries: int = 3,
+    cache_stats: dict[str, int] | None = None,
+) -> dict:
+    messages = _build_audit_messages(candidate)
 
     for attempt in range(max_retries):
         try:
@@ -199,6 +283,7 @@ def _call_audit_api(candidate: dict, client, model: str, max_retries: int = 3) -
                 stream=False,
                 extra_body={"thinking": {"type": "disabled"}},
             )
+            _record_cache_usage(resp, cache_stats)
             result = _extract_json_object(resp.choices[0].message.content)
             result["id"] = str(candidate["id"])
             return _normalize_audit_result(result)
@@ -253,14 +338,30 @@ def audit_candidates(
     client = _get_client(api_key)
 
     audits = []
+    cache_stats: dict[str, int] = {"requests": 0, "hit_tokens": 0, "miss_tokens": 0}
     for idx, candidate in enumerate(candidates, 1):
-        audits.append(_call_audit_api(candidate, client, model))
+        audits.append(_call_audit_api(candidate, client, model, cache_stats=cache_stats))
         if idx % 50 == 0:
             _save_json(output_path, audits)
-            logger.info(f"审计进度: {idx}/{len(candidates)}")
+            hit = cache_stats["hit_tokens"]
+            miss = cache_stats["miss_tokens"]
+            total = hit + miss
+            hit_rate = hit / total * 100 if total else 0.0
+            logger.info(
+                f"审计进度: {idx}/{len(candidates)} | "
+                f"DeepSeek缓存 hit={hit}, miss={miss}, hit_rate={hit_rate:.1f}%"
+            )
 
     _save_json(output_path, audits)
     logger.info(f"审计完成: {len(audits)} -> {output_path}")
+    hit = cache_stats["hit_tokens"]
+    miss = cache_stats["miss_tokens"]
+    total = hit + miss
+    hit_rate = hit / total * 100 if total else 0.0
+    logger.info(
+        f"DeepSeek缓存汇总: requests={cache_stats['requests']}, "
+        f"hit={hit}, miss={miss}, hit_rate={hit_rate:.1f}%"
+    )
     return audits
 
 
