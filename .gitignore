@@ -39,23 +39,25 @@ env/
 *.swp
 *.swo
 
-#data
-data/processed/test
-data
-
-
 # OS
 .DS_Store
 Thumbs.db
 
-# 大文件（通过 README 说明获取方式）
+# 数据文件（JSON/CSV/JSONL 大文件，不跟踪）
 data/raw/*.json
-data/processed/train_cot_raw.json
+data/raw/*.csv
+data/processed/*.json
+data/processed/*.jsonl
+data/processed/test/
+data/splits/*.json
 
-# 保留目录结构
+# 保留目录结构的 .gitkeep
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/splits/.gitkeep
 !outputs/checkpoints/.gitkeep
 !outputs/submissions/.gitkeep
 !outputs/logs/.gitkeep
+
+# 提交结果
+outputs/submissions/*.csv
