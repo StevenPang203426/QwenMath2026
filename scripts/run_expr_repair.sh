@@ -9,6 +9,7 @@
 set -e
 
 PYTHON=${PYTHON:-.venv/bin/python}
+CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-100}
 
 MODE=${1:-api}
 LIMIT=0
@@ -27,6 +28,7 @@ fi
 echo "=============================="
 echo " 表达式规范修复"
 echo "=============================="
+echo " 检查点: 每 $CHECKPOINT_EVERY 条写盘"
 
 mkdir -p data/processed/intermediate/expression_repair
 
@@ -36,7 +38,7 @@ if [ "$LIMIT" -gt 0 ] 2>/dev/null; then
     echo " 限制: $LIMIT 条"
 fi
 
-$PYTHON -m src.data.expression_repair $NO_API_ARG $LIMIT_ARG
+$PYTHON -m src.data.expression_repair --checkpoint_every "$CHECKPOINT_EVERY" $NO_API_ARG $LIMIT_ARG
 
 echo "安全表达式: data/processed/intermediate/expression_repair/expr_correct_safe.json"
 echo "修复记录: data/processed/intermediate/expression_repair/expr_repaired.json"

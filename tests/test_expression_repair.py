@@ -134,7 +134,53 @@ def test_expression_repair_can_write_safe_artifacts_without_api_calls():
         assert _read_json(report_path)[0]["stats"]["rejected"] == 1
 
 
+def test_expression_repair_checkpoints_partial_outputs():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        raw_path = root / "train.json"
+        expr_path = root / "expr_correct.json"
+        safe_path = root / "expr_safe.json"
+        repaired_path = root / "expr_repaired.json"
+        rejected_path = root / "expr_rejected.json"
+        report_path = root / "expr_report.json"
+        sft_path = root / "train_expr_safe.json"
+
+        _write_json(raw_path, [
+            {"id": "1", "question": "3盒彩笔，每盒4支，一共多少支？", "answer": "12"},
+            {"id": "2", "question": "5减2是多少？", "answer": "3"},
+        ])
+        _write_json(expr_path, [
+            {"id": "1", "question": "3盒彩笔，每盒4支，一共多少支？", "answer": "12", "expression": "3*4", "valid": True, "status": "ok"},
+            {"id": "2", "question": "5减2是多少？", "answer": "3", "expression": "5>2", "valid": False, "status": "eval_mismatch"},
+        ])
+
+        def fake_request(item, attempt, messages):
+            assert item["id"] == "2"
+            assert [row["id"] for row in _read_json(safe_path)] == ["1"]
+            assert _read_json(report_path)[0]["complete"] is False
+            return {"expression": "5-2", "raw_response": "<expr>5-2</expr>"}
+
+        repair_expression_records(
+            raw_path=str(raw_path),
+            expr_path=str(expr_path),
+            safe_output=str(safe_path),
+            repaired_output=str(repaired_path),
+            rejected_output=str(rejected_path),
+            report_output=str(report_path),
+            sft_output=str(sft_path),
+            request_fn=fake_request,
+            max_attempts=1,
+            checkpoint_every=1,
+        )
+
+        report = _read_json(report_path)[0]
+        assert report["complete"] is True
+        assert report["processed"] == 2
+        assert [item["id"] for item in _read_json(sft_path)] == ["1", "2"]
+
+
 if __name__ == "__main__":
     test_expression_repair_is_idempotent_and_writes_only_safe_data()
     test_expression_repair_can_write_safe_artifacts_without_api_calls()
+    test_expression_repair_checkpoints_partial_outputs()
     print("expression repair tests: ALL PASSED")

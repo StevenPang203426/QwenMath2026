@@ -26,6 +26,20 @@ export DEEPSEEK_API_KEY=your_key
 bash scripts/run_expr_repair.sh
 ```
 
+脚本默认每 100 条写一次 checkpoint，可通过环境变量调整：
+
+```bash
+CHECKPOINT_EVERY=50 bash scripts/run_expr_repair.sh
+```
+
+如果本机 `no_proxy` 环境变量含有异常字符，OpenAI/httpx 初始化可能报 `Invalid port`。本次运行通过覆盖干净代理例外列表解决：
+
+```bash
+env no_proxy='localhost,127.0.0.1,::1' NO_PROXY='localhost,127.0.0.1,::1' bash scripts/run_expr_repair.sh
+```
+
+本次真实 API 修复结果：原安全样本 10702 条，API 修复成功 245 条，最终安全样本 10947 条，剩余 rejected 1052 条；安全样本复验 0 违规。报告记录 API 请求 3420 次，prompt cache hit tokens 801664，miss tokens 333258。
+
 ## 表达式实验矩阵
 
 ```bash

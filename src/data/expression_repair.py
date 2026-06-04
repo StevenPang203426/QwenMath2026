@@ -87,10 +87,12 @@ def repair_expression_records(
     model: str = DEFAULT_MODEL,
     max_attempts: int = 3,
     limit: int = 0,
+    checkpoint_every: int = 0,
 ) -> list[dict]:
     raw_records = _load_json_records(raw_path)
     if limit > 0:
         raw_records = raw_records[:limit]
+    total_records = len(raw_records)
     existing_by_id = {str(item["id"]): item for item in _load_json_records(expr_path) if "id" in item}
     if request_fn is not None:
         request = request_fn
@@ -105,7 +107,42 @@ def repair_expression_records(
     stats: Counter[str] = Counter()
     cache_stats: Counter[str] = Counter()
 
-    for raw_item in raw_records:
+    def write_checkpoint(processed: int, complete: bool) -> None:
+        report = _build_repair_report(
+            raw_path=raw_path,
+            expr_path=expr_path,
+            safe=safe,
+            repaired=repaired,
+            rejected=rejected,
+            stats=stats,
+            cache_stats=cache_stats,
+            max_attempts=max_attempts,
+            processed=processed,
+            total=total_records,
+            complete=complete,
+        )
+        _write_repair_outputs(
+            safe_output=safe_output,
+            repaired_output=repaired_output,
+            rejected_output=rejected_output,
+            report_output=report_output,
+            sft_output=sft_output,
+            safe=safe,
+            repaired=repaired,
+            rejected=rejected,
+            report=report,
+        )
+        if not complete:
+            logger.info(
+                "表达式修复进度 %s/%s safe=%s repaired=%s rejected=%s",
+                processed,
+                total_records,
+                len(safe),
+                len(repaired),
+                len(rejected),
+            )
+
+    for processed, raw_item in enumerate(raw_records, start=1):
         item_id = str(raw_item.get("id", ""))
         existing = existing_by_id.get(item_id)
         candidate = _candidate_from(raw_item, existing)
@@ -117,6 +154,8 @@ def repair_expression_records(
         if check["safe"]:
             safe.append(_safe_record(candidate, check, source=candidate.get("source", "expr_existing")))
             stats["safe_existing"] += 1
+            if checkpoint_every > 0 and processed % checkpoint_every == 0:
+                write_checkpoint(processed, complete=False)
             continue
 
         candidate["policy_reasons"] = check.get("policy_reasons", [])
@@ -148,7 +187,27 @@ def repair_expression_records(
             rejected.append(_rejected_record(candidate, last_expr, last_check, raw_response, max_attempts))
             stats["rejected"] += 1
 
-    report = [{
+        if checkpoint_every > 0 and processed % checkpoint_every == 0:
+            write_checkpoint(processed, complete=False)
+
+    write_checkpoint(total_records, complete=True)
+    return safe
+
+
+def _build_repair_report(
+    raw_path: str,
+    expr_path: str,
+    safe: list[dict],
+    repaired: list[dict],
+    rejected: list[dict],
+    stats: Counter[str],
+    cache_stats: Counter[str],
+    max_attempts: int,
+    processed: int,
+    total: int,
+    complete: bool,
+) -> list[dict]:
+    return [{
         "input": raw_path,
         "existing": expr_path,
         "safe": len(safe),
@@ -157,15 +216,30 @@ def repair_expression_records(
         "stats": dict(stats),
         "cache": dict(cache_stats),
         "max_attempts": max_attempts,
+        "processed": processed,
+        "total": total,
+        "complete": complete,
         "safety_contract": "pure_arithmetic_eval_then_question_normalization",
     }]
+
+
+def _write_repair_outputs(
+    safe_output: str,
+    repaired_output: str,
+    rejected_output: str,
+    report_output: str,
+    sft_output: str,
+    safe: list[dict],
+    repaired: list[dict],
+    rejected: list[dict],
+    report: list[dict],
+) -> None:
     _save_json_records(safe_output, safe)
     _save_json_records(repaired_output, repaired)
     _save_json_records(rejected_output, rejected)
     _save_json_records(report_output, report)
     if sft_output:
         _save_json_records(sft_output, _to_sft_records(safe))
-    return safe
 
 
 def _to_sft_records(records: list[dict]) -> list[dict]:
@@ -347,6 +421,7 @@ def main() -> None:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--max_attempts", type=int, default=3)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--checkpoint_every", type=int, default=100)
     parser.add_argument("--no_api", action="store_true", help="只生成当前安全数据与拒绝报告，不请求外部 API")
     args = parser.parse_args()
 
@@ -364,6 +439,7 @@ def main() -> None:
         model=args.model,
         max_attempts=0 if args.no_api else args.max_attempts,
         limit=args.limit,
+        checkpoint_every=args.checkpoint_every,
     )
 
 
