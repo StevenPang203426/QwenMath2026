@@ -37,6 +37,8 @@
 
 ## 2. 数据构造
 
+表达式路线的数据构造应接入数据质量审计与增强流程，详见 `docs/data_quality_augmentation_plan.md`。核心顺序是：先审计和高门槛自动修复，再只对高可信且表达式可验证的题做规则优先增强。
+
 ### 2.1 DeepSeek API 生成表达式
 
 为训练集中每道题调用 DeepSeek V4 Flash API，生成中缀表达式。
@@ -89,6 +91,64 @@ def verify_expression(expr_str: str, gold_answer: str) -> bool:
 验证通过 → 采用为正样本（SFT + DPO chosen）
 验证失败 → 丢弃（或用作 DPO rejected，如果表达式本身可解析但结果错误）
 
+### 2.2.1 合规筛查与自动重算
+
+表达式数据构建启用默认筛查机制，断点续传时不再简单按 `id` 跳过已有记录，而是先判断记录是否合规。
+
+**正确表达式模式（`correct`）合规条件：**
+
+```python
+status == "ok" and valid is True and expression 非空
+```
+
+如果已有记录出现以下情况，会自动重算：
+
+- 表达式可解析但结果与标准答案不匹配
+- 表达式为空
+- 表达式不可解析
+- API 失败
+- 状态字段异常
+
+**错误表达式模式（`wrong`）合规条件：**
+
+```python
+status == "ok" and valid is False and eval_result is not None and expression 非空
+```
+
+如果已有记录出现以下情况，会自动重算：
+
+- 错误表达式反而算对（`accidentally_correct`）
+- 错误表达式不可解析（`unparseable`）
+- 表达式为空
+- API 失败
+- 状态字段异常
+
+**重算策略：**
+
+- 默认启用，不需要额外 `--repair` 参数
+- 每条不合规记录最多重算 3 次（`MAX_REPAIR_ATTEMPTS = 3`）
+- 3 次后仍不合规，则保留最后一次结果并写入诊断字段
+- 转换 SFT/DPO 数据时仍只使用合规记录，不合规记录不会进入训练集
+
+**诊断字段：**
+
+```json
+{
+  "attempts": 3,
+  "repair_reason": "wrong_accidentally_correct"
+}
+```
+
+常见 `repair_reason`：
+
+- `missing`：没有旧记录或新样本
+- `correct_invalid`：正确表达式模式下结果不匹配
+- `wrong_accidentally_correct`：错误表达式模式下反而算对
+- `wrong_unparseable`：错误表达式不可解析
+- `api_failed`：API 调用失败
+- `empty_expression`：表达式为空
+- `wrong_invalid` / `invalid_status`：其他状态异常
+
 ### 2.3 数据格式
 
 **SFT 训练数据（train_expr.json）：**
@@ -116,11 +176,12 @@ def verify_expression(expr_str: str, gold_answer: str) -> bool:
 
 ### 2.4 缓存策略
 
-复用现有 data_builder.py 的幂等缓存机制：
+复用现有 data_builder.py 的幂等缓存机制，并增加质量门控：
 
 - 按 prompt 类型分批（表达式正样本 / 表达式负样本）
 - 相同前缀的 prompt 排列在一起，提高 DeepSeek context cache 命中率
-- 已有结果的条目跳过，断点续传
+- 已有且合规的结果跳过，断点续传
+- 已有但不合规的结果自动进入重算队列，避免坏数据被缓存固化
 
 ### 2.5 预计数据量
 

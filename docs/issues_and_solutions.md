@@ -483,6 +483,49 @@ python -c "import yaml; yaml.safe_load(open('configs/grpo.yaml')); print('OK')"
 
 ---
 
+## 33. 表达式数据断点续传固化坏样本
+
+**现象：** `expr_builder.py` 生成的数据中存在不合规记录，例如正确表达式算错、错误表达式反而算对、错误表达式不可解析。重新运行脚本时，这些记录因为已有相同 `id` 被断点续传直接跳过，坏数据被固化。
+
+**原因：** 原逻辑只按 `id` 判断是否已处理：已有结果直接跳过，没有检查该结果是否满足当前模式的质量要求。
+
+**合规规则：**
+
+正确表达式模式（`correct`）：
+```python
+status == "ok" and valid is True and expression 非空
+```
+
+错误表达式模式（`wrong`）：
+```python
+status == "ok" and valid is False and eval_result is not None and expression 非空
+```
+
+**解决：** 在 `src/data/expr_builder.py` 中新增质量门控和自动重算：
+
+- 新增 `MAX_REPAIR_ATTEMPTS = 3`
+- 新增 `_is_compliant_expr_record()` 判断已有记录是否可复用
+- 新增 `_repair_reason()` 标记不合规原因
+- 断点续传时只跳过合规记录，不合规记录进入重算队列
+- 每条不合规记录最多重算 3 次，仍失败则保留最后一次结果
+- 输出增加 `attempts` 和 `repair_reason` 诊断字段
+- `convert_sft_format()` / `convert_to_dpo_format()` 仍只使用合规记录
+
+**常见 repair_reason：**
+
+- `correct_invalid`：正确表达式模式下结果不匹配
+- `wrong_accidentally_correct`：错误表达式模式下反而算对
+- `wrong_unparseable`：错误表达式不可解析
+- `api_failed`：API 调用失败
+- `empty_expression`：表达式为空
+
+**验证：**
+```bash
+python -m py_compile src/data/expr_builder.py
+```
+
+---
+
 ## 待解决 / 后续计划
 
 | 编号 | 事项 | 状态 |
