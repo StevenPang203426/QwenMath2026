@@ -16,6 +16,13 @@ from typing import Optional
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from src.utils.answer_normalizer import (
+    answers_match as _normalized_answers_match,
+    answers_match_by_question,
+    normalize_answer_for_question,
+    safe_eval_expression,
+)
+
 logger = logging.getLogger("math_solver.expr_builder")
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -46,11 +53,7 @@ def safe_eval(expr_str: str) -> float:
 
     仅允许数字常量和基本运算符，不允许函数调用或变量访问。
     """
-    if not expr_str or not expr_str.strip():
-        raise ValueError("Empty expression")
-    expr_str = expr_str.strip()
-    tree = ast.parse(expr_str, mode='eval')
-    return _eval_node(tree.body)
+    return safe_eval_expression(expr_str)
 
 
 def _eval_node(node):
@@ -153,12 +156,7 @@ def _normalize_answer(s: str) -> Optional[float]:
 
 
 def _answers_match(a, b, tol: float = 1e-4) -> bool:
-    if str(a).strip() == str(b).strip():
-        return True
-    va, vb = _normalize_answer(str(a)), _normalize_answer(str(b))
-    if va is not None and vb is not None:
-        return abs(va - vb) < tol
-    return False
+    return _normalized_answers_match(a, b, tol=tol)
 
 
 def _extract_expr(content: str) -> str:
@@ -261,7 +259,7 @@ def _call_expr_api(
 # 验证函数
 # ============================================================
 
-def verify_expression(expr_str: str, gold_answer: str) -> dict:
+def verify_expression(expr_str: str, gold_answer: str, question: str = "") -> dict:
     """
     验证表达式是否正确
 
@@ -280,11 +278,16 @@ def verify_expression(expr_str: str, gold_answer: str) -> dict:
         return {"valid": False, "eval_result": None, "error": f"eval_failed: {e}"}
 
     result_str = str(int(result)) if result == int(result) else str(result)
+    formatted_result = normalize_answer_for_question(result_str, question) if question else result_str
 
-    if _answers_match(result_str, gold_answer):
-        return {"valid": True, "eval_result": result_str, "error": None}
+    if answers_match_by_question(result_str, gold_answer, question) if question else _answers_match(result_str, gold_answer):
+        return {"valid": True, "eval_result": formatted_result, "error": None}
     else:
-        return {"valid": False, "eval_result": result_str, "error": f"mismatch: eval={result_str}, gold={gold_answer}"}
+        return {
+            "valid": False,
+            "eval_result": formatted_result,
+            "error": f"mismatch: eval={formatted_result}, gold={gold_answer}",
+        }
 
 
 def _is_compliant_expr_record(item: dict, generate_wrong: bool) -> bool:
@@ -413,7 +416,7 @@ def build_expr_dataset(
                 }
             else:
                 expr = result["expression"]
-                verification = verify_expression(expr, gold_answer)
+                verification = verify_expression(expr, gold_answer, question)
 
                 last_output = {
                     "id": item_id,
@@ -651,7 +654,7 @@ if __name__ == "__main__":
         export_failed_to_candidates(
             correct_path="data/processed/expr_correct.jsonl",
             wrong_path="data/processed/expr_wrong.jsonl",
-            output_path="data/processed/quality_candidates.json",
+            output_path="data/processed/intermediate/quality/quality_candidates.json",
         )
     else:
         print(f"未知模式: {mode}")

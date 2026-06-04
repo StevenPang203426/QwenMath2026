@@ -17,7 +17,7 @@ echo " 数据质量审计"
 echo " 模式: $MODE"
 echo "=============================="
 
-mkdir -p data/processed
+mkdir -p data/processed data/processed/intermediate/quality
 
 LIMIT_ARG=""
 if [ "$LIMIT" -gt 0 ] 2>/dev/null; then
@@ -27,7 +27,7 @@ fi
 
 run_candidates() {
     python -m src.data.quality_auditor candidates $LIMIT_ARG
-    echo "候选已生成: data/processed/quality_candidates.json"
+    echo "候选已生成: data/processed/intermediate/quality/quality_candidates.json"
 }
 
 run_audit() {
@@ -36,7 +36,7 @@ run_audit() {
         exit 1
     fi
     python -m src.data.quality_auditor audit --api_key "$DEEPSEEK_API_KEY" $LIMIT_ARG
-    echo "审计已生成: data/processed/quality_audit.json"
+    echo "审计已生成: data/processed/intermediate/quality/quality_audit.json"
 }
 
 run_repair() {

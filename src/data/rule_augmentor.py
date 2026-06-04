@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from src.data.expr_builder import _load_json_records, _save_json_records, safe_eval
+from src.utils.answer_normalizer import normalize_answer_for_question, normalize_question_text
 
 logger = logging.getLogger("math_solver.rule_augmentor")
 
@@ -40,10 +41,15 @@ def _load_json(path: str) -> list[dict]:
 
 
 def _audit_excluded_ids(audit_path: str) -> set[str]:
-    if not Path(audit_path).exists():
+    path = Path(audit_path)
+    if not path.exists() and audit_path == "data/processed/intermediate/quality/quality_audit.json":
+        legacy = Path("data/processed/quality_audit.json")
+        if legacy.exists():
+            path = legacy
+    if not path.exists():
         return set()
     excluded = set()
-    for item in _load_json(audit_path):
+    for item in _load_json(str(path)):
         label = item.get("label")
         if label in BAD_AUDIT_LABELS:
             excluded.add(str(item["id"]))
@@ -90,16 +96,17 @@ def _replace_number_token(text: str, old: str, new: str) -> tuple[str, int]:
     return pattern.subn(new, text)
 
 
-def _answer_from_expr(expr: str) -> str | None:
+def _answer_from_expr(expr: str, question: str) -> str | None:
     try:
         value = safe_eval(expr.replace("×", "*").replace("÷", "/").replace("^", "**"))
     except Exception:
         return None
-    return str(int(value)) if value == int(value) else str(round(value, 6)).rstrip("0").rstrip(".")
+    raw_answer = str(int(value)) if value == int(value) else str(round(value, 6)).rstrip("0").rstrip(".")
+    return normalize_answer_for_question(raw_answer, question)
 
 
 def _augment_one(item: dict, expr_item: dict, rng: random.Random, ratio: float) -> dict | None:
-    question = str(item.get("question", ""))
+    question = normalize_question_text(item.get("question", ""))
     expression = str(expr_item.get("expression", ""))
     question_nums = set(_extract_numbers(question))
     expr_nums = [
@@ -118,7 +125,7 @@ def _augment_one(item: dict, expr_item: dict, rng: random.Random, ratio: float) 
         new_expression, e_count = _replace_number_token(expression, old_num, new_num)
         if q_count == 0 or e_count == 0 or new_question == question or new_expression == expression:
             continue
-        new_answer = _answer_from_expr(new_expression)
+        new_answer = _answer_from_expr(new_expression, new_question)
         if new_answer is None:
             continue
         return {
@@ -175,7 +182,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="规则优先数据增强")
     parser.add_argument("--input", default="data/raw/train.json")
     parser.add_argument("--expr", default="data/processed/expr_correct.jsonl")
-    parser.add_argument("--audit", default="data/processed/quality_audit.json")
+    parser.add_argument("--audit", default="data/processed/intermediate/quality/quality_audit.json")
     parser.add_argument("--output", default="data/processed/train_augmented.json")
     parser.add_argument("--num_augments", type=int, default=1)
     parser.add_argument("--ratio", type=float, default=0.3)

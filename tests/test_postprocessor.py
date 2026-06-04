@@ -60,6 +60,8 @@ def test_postprocess_percentage():
     assert postprocess_answer("25%", "合格率是百分之几？") == "25%"
     # 模型输出 12.5，题目问百分率 → 12.5%
     assert postprocess_answer("12.5", "发芽率是百分之几？") == "12.5%"
+    # 百分数语义 + 百分号前保留一位小数，仍应保留百分号
+    assert postprocess_answer("23.4375", "甲数是乙数的百分之几?(百分号前保留一位小数)") == "23.4%"
 
     print("  postprocess_percentage: ALL PASSED")
 

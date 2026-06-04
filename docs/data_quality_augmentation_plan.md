@@ -2,7 +2,7 @@
 
 > 项目：CCF BDCI 小学数学应用题自动解题
 > 编写日期：2026-06-02
-> 状态：方案设计，待实施
+> 状态：已实现，包含题目级修复、表达式格式修复、增强数据对应性审计
 
 ---
 
@@ -12,6 +12,8 @@
 
 - 原始题目质量问题：OCR 错误、漏百分号、分数识别错误、题意歧义、标注答案错误等。
 - 生成数据质量问题：正确表达式算错、错误表达式反而算对、错误表达式不可解析等。
+- 表达式本身列式正确，但裸 `eval_result` 没有按题意输出百分数、分数、保留小数或离散取整格式，导致 `valid=false`。
+- 规则增强样本需要验证题干和表达式是否由同一个源题、同一组 `changed_numbers` 同步替换得到，不能只看表达式计算值是否等于答案。
 
 如果直接基于这些数据做 SFT/DPO/GRPO 或数据增强，坏题会被复制放大，训练集噪声增加。
 
@@ -26,8 +28,9 @@
 1. 规则预筛：用现有表达式验证、答案一致性、异常文本模式筛出高风险题。
 2. 大模型审计：只把高风险题交给商业大模型，降低 token 成本。
 3. 高门槛自动修复：只有满足强验证条件的修复才写入 repaired 数据。
-4. 高可信数据增强：只增强审计通过且表达式可验证的题。
-5. 合并训练集：原始高可信题 + repaired 题 + augmented 题，保留来源字段。
+4. 表达式格式修复：对 `expr_correct.jsonl` 中 `valid=false` 的记录做题意格式化验证，独立输出格式修复数据。
+5. 高可信数据增强：只增强审计通过且表达式可验证的题，并对增强结果做题干-表达式同源替换审计。
+6. 合并训练集：原始高可信题 + 题目级 repaired 题 + 格式 repaired 题 + clean augmented 题，保留来源字段。
 
 核心原则：
 
@@ -80,6 +83,7 @@
 - 多次生成得到不同答案。
 
 预筛输出：`data/processed/quality_candidates.json`
+实际落盘路径：`data/processed/intermediate/quality/quality_candidates.json`
 
 ```json
 [
@@ -97,7 +101,7 @@
 
 大模型只审计预筛出的候选题。
 
-输出文件：`data/processed/quality_audit.json`
+输出文件：`data/processed/intermediate/quality/quality_audit.json`
 
 ```json
 [
@@ -151,6 +155,29 @@
 ]
 ```
 
+### 4.3 表达式格式修复
+
+格式修复解决第二类问题：表达式列式正确，但 `safe_eval(expression)` 的裸结果没有满足题目要求。例如：
+
+- 题目问“几分之几”，表达式结果是 `0.6`，标注答案是 `3/5`。
+- 题目问“合格率/百分率”，表达式结果是 `0.25`，标注答案是 `25%`。
+- 题目问“至少需要几辆车”，表达式结果是 `3.2`，标注答案是 `4`。
+- 题目要求“保留两位小数”，表达式结果需要按题意四舍五入。
+
+实现入口：
+
+- 共享规则：`src/utils/answer_normalizer.py`
+- 格式修复：`src/data/format_repair.py`
+- 推理兼容入口：`src/inference/answer_postprocessor.py`
+
+输出文件：
+
+- 修复成功：`data/processed/intermediate/format_repair/expr_format_repaired.json`
+- 修复拒绝：`data/processed/intermediate/format_repair/expr_format_rejected.json`
+- 统计报告：`data/processed/intermediate/format_repair/format_repair_report.json`
+
+格式修复不覆盖 `expr_correct.jsonl`，最终由合并脚本消费独立产物。
+
 ---
 
 ## 5. 数据增强
@@ -180,8 +207,8 @@
 2. 选择 1 个或多个可替换数字。
 3. 按题型约束生成新数字，避免负数、非整数、不合理比例。
 4. 同步替换题干中的数字和表达式中的对应数字。
-5. 使用 `safe_eval()` 计算新答案。
-6. 检查新答案是否符合题目要求，例如整数、分数、百分数。
+5. 使用 `safe_eval()` 计算新答案，并按题意格式化。
+6. 检查增强题干和增强表达式是否都能由 `source_id + changed_numbers` 精确推出。
 7. 输出增强样本。
 
 每道高可信题第一版最多生成 1 个增强样本。
@@ -215,6 +242,27 @@
   }
 ]
 ```
+
+### 5.5 增强审计与清洗
+
+增强审计的正确性口径不是“表达式值等于答案”，而是：
+
+- 用 `source_id` 找回原始题干和原始表达式。
+- 将 `changed_numbers` 同步应用到原始题干和原始表达式。
+- 增强题干必须等于替换后的题干；增强表达式必须等于替换后的表达式。
+- 每个替换数字必须同时命中题干和表达式。
+
+当前检查结论：
+
+- 当前重跑后的 `data/processed/train_augmented.json` 共 666 条。
+- 666/666 条题干与表达式都满足同源替换对应关系。
+- `train_augmented_clean.json` 中 0 条题干保留 Python list 字符串污染；本轮有 2 条题干在审计阶段被清洗。
+
+输出文件：
+
+- clean 增强数据：`data/processed/intermediate/augmentation/train_augmented_clean.json`
+- rejected 增强数据：`data/processed/intermediate/augmentation/train_augmented_rejected.json`
+- 审计报告：`data/processed/intermediate/augmentation/augmentation_report.json`
 
 ---
 
@@ -250,6 +298,7 @@ token 主要来自大模型回退增强，应作为可选流程：
 
 - 原始高可信题：`source="raw_ok"`
 - 自动修复题：`source="auto_repair"`
+- 格式修复题：`source="expr_format_repair"`
 - 规则增强题：`source="rule_augment"`
 - 大模型回退增强题：`source="llm_augment"`
 
@@ -259,6 +308,7 @@ token 主要来自大模型回退增强，应作为可选流程：
 |------|----------|
 | `raw_ok` | 1.0 |
 | `auto_repair` | 0.7 |
+| `expr_format_repair` | 0.8 |
 | `rule_augment` | 0.8 |
 | `llm_augment` | 0.6 |
 
@@ -273,10 +323,14 @@ token 主要来自大模型回退增强，应作为可选流程：
 - `src/data/quality_auditor.py`：预筛 + 大模型审计 + 自动修复输出。
 - `src/data/rule_augmentor.py`：规则改数 + 表达式重算。
 - `src/data/merge_clean_data.py`：合并 raw_ok / repaired / augmented。
+- `src/data/format_repair.py`：表达式正确但答案格式不规范的独立修复。
+- `src/data/augmentation_auditor.py`：增强题干和表达式的同源替换审计。
+- `src/utils/answer_normalizer.py`：数据修复和推理共用的答案格式规则。
 
 建议新增脚本：
 
 - `scripts/run_quality_audit.sh`
+- `scripts/run_format_repair.sh`
 - `scripts/run_data_augment.sh`
 - `scripts/run_clean_data_merge.sh`
 
@@ -284,9 +338,10 @@ token 主要来自大模型回退增强，应作为可选流程：
 
 ## 9. 第一版验收标准
 
-- 质量审计能输出 `quality_candidates.json` 和 `quality_audit.json`。
+- 质量审计能输出 `intermediate/quality/quality_candidates.json` 和 `intermediate/quality/quality_audit.json`。
 - 自动修复只写回满足高门槛验证的记录。
+- 格式修复不覆盖 `expr_correct.jsonl`，只生成独立修复/拒绝/报告产物。
 - 数据增强默认不调用大模型，每道高可信题最多生成 1 个增强样本。
-- 所有增强样本都有可 eval 的表达式和程序计算答案。
+- 所有 clean 增强样本都通过 `source_id + changed_numbers` 的题干-表达式同源替换检查。
 - 所有输出文件保留 `source` / `source_id`，不覆盖原始数据。
 - 能统计各阶段数量：候选数、审计数、修复写回数、增强数、过滤数。

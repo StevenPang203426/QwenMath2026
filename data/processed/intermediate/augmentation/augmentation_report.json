@@ -1,0 +1,13 @@
+[
+  {
+    "input": "data/processed/train_augmented.json",
+    "clean": 666,
+    "rejected": 0,
+    "stats": {
+      "total": 666,
+      "clean": 666,
+      "question_cleaned": 2
+    },
+    "correctness_basis": "question and expression must both be exact source_id + changed_numbers replacements"
+  }
+]

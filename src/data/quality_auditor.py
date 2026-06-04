@@ -22,6 +22,7 @@ from src.data.expr_builder import (
     _save_json_records,
     safe_eval,
 )
+from src.utils.answer_normalizer import answers_match_by_question, normalize_question_text
 
 logger = logging.getLogger("math_solver.quality_auditor")
 
@@ -103,6 +104,10 @@ def _get_client(api_key: str):
 
 
 def _load_json(path: str) -> list[dict]:
+    if not Path(path).exists() and path == "data/processed/intermediate/quality/quality_audit.json":
+        legacy = Path("data/processed/quality_audit.json")
+        if legacy.exists():
+            path = str(legacy)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -137,7 +142,7 @@ def _question_has_ambiguity_signal(text: str) -> bool:
 
 
 def _candidate_signals(item: dict, expr_item: dict | None, cot_item: dict | None) -> list[str]:
-    question = str(item.get("question", ""))
+    question = normalize_question_text(item.get("question", ""))
     answer = str(item.get("answer", ""))
     signals = []
 
@@ -147,7 +152,7 @@ def _candidate_signals(item: dict, expr_item: dict | None, cot_item: dict | None
         api_answer = cot_item.get("api_answer")
         if api_answer and not _answers_match(api_answer, answer):
             signals.append("cot_answer_disagreement")
-    if expr_item and expr_item.get("eval_result") and not _answers_match(expr_item["eval_result"], answer):
+    if expr_item and expr_item.get("eval_result") and not answers_match_by_question(expr_item["eval_result"], answer, question):
         signals.append("expr_answer_disagreement")
     if _looks_like_ocr_fraction(question):
         signals.append("suspected_ocr_fraction")
@@ -197,7 +202,7 @@ def build_quality_candidates(
         if score >= threshold:
             candidates.append({
                 "id": item_id,
-                "question": item.get("question", ""),
+                "question": normalize_question_text(item.get("question", "")),
                 "answer": str(item.get("answer", "")),
                 "signals": signals,
                 "risk_score": round(score, 4),
@@ -382,7 +387,7 @@ def _repair_is_valid(audit: dict) -> tuple[bool, str | None]:
     except Exception as e:
         return False, f"repair_eval_failed: {e}"
     value_str = str(int(value)) if value == int(value) else str(value)
-    if not _answers_match(value_str, answer):
+    if not answers_match_by_question(value_str, answer, question):
         return False, f"repair_answer_mismatch: eval={value_str}, answer={answer}"
     return True, None
 
@@ -401,7 +406,7 @@ def build_repaired_data(audit_path: str, output_path: str) -> list[dict]:
             "id": f"repair_{audit['id']}",
             "source_id": str(audit["id"]),
             "source": "auto_repair",
-            "question": audit["repaired_question"],
+            "question": normalize_question_text(audit["repaired_question"]),
             "answer": str(audit["repaired_answer"]),
             "expression": audit["repair_expression"],
             "audit_label": audit["label"],
@@ -420,21 +425,21 @@ def main() -> None:
 
     cand = sub.add_parser("candidates", help="规则预筛质量候选")
     cand.add_argument("--input", default="data/raw/train.json")
-    cand.add_argument("--output", default="data/processed/quality_candidates.json")
+    cand.add_argument("--output", default="data/processed/intermediate/quality/quality_candidates.json")
     cand.add_argument("--expr", default="data/processed/expr_correct.jsonl")
     cand.add_argument("--cot", default="data/processed/train_cot_raw.json")
     cand.add_argument("--threshold", type=float, default=0.25)
     cand.add_argument("--limit", type=int, default=0)
 
     audit = sub.add_parser("audit", help="调用大模型审计候选")
-    audit.add_argument("--candidates", default="data/processed/quality_candidates.json")
-    audit.add_argument("--output", default="data/processed/quality_audit.json")
+    audit.add_argument("--candidates", default="data/processed/intermediate/quality/quality_candidates.json")
+    audit.add_argument("--output", default="data/processed/intermediate/quality/quality_audit.json")
     audit.add_argument("--api_key", default=os.environ.get("DEEPSEEK_API_KEY", ""))
     audit.add_argument("--model", default=DEFAULT_MODEL)
     audit.add_argument("--limit", type=int, default=0)
 
     repair = sub.add_parser("repair", help="根据审计结果生成自动修复数据")
-    repair.add_argument("--audit", default="data/processed/quality_audit.json")
+    repair.add_argument("--audit", default="data/processed/intermediate/quality/quality_audit.json")
     repair.add_argument("--output", default="data/processed/train_repaired.json")
 
     args = parser.parse_args()

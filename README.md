@@ -128,6 +128,43 @@ python -m src.data.data_builder \
 | `--generate_wrong` | 关闭 | 同时生成错误推理（DPO 偏好对） |
 | `--wrong_method` | `simple` | 错误推理方式：`simple`（推荐）或 `scdpo` |
 
+### 数据修复、格式修复与增强清洗
+
+数据治理流程分为两类修复和一类增强审计：
+
+- 题目级修复：处理 OCR、漏符号、题目自身错误、标注答案错误等问题。
+- 格式修复：处理 `expr_correct.jsonl` 中表达式列式正确，但结果未按题意输出百分数、分数、保留小数或离散取整格式的问题。
+- 增强审计：检查增强题干和增强表达式是否都能由同一个 `source_id + changed_numbers` 同步替换得到；不把“表达式值等于答案”当成题干一致性的证据。
+
+```bash
+# 1. 题目级质量审计与自动修复，需要 DEEPSEEK_API_KEY
+export DEEPSEEK_API_KEY=your_key
+bash scripts/run_quality_audit.sh all
+
+# 2. 表达式答案格式修复，不调用 API
+bash scripts/run_format_repair.sh
+
+# 3. 规则增强 + 增强数据对应性审计
+bash scripts/run_data_augment.sh
+
+# 4. 合并 raw_ok、auto_repair、expr_format_repair、clean rule_augment
+bash scripts/run_clean_data_merge.sh
+```
+
+主要产物：
+
+| 产物 | 路径 |
+|------|------|
+| 质量候选 | `data/processed/intermediate/quality/quality_candidates.json` |
+| 质量审计 | `data/processed/intermediate/quality/quality_audit.json` |
+| 题目级修复 | `data/processed/train_repaired.json` |
+| 格式修复 | `data/processed/intermediate/format_repair/expr_format_repaired.json` |
+| 格式修复报告 | `data/processed/intermediate/format_repair/format_repair_report.json` |
+| clean 增强数据 | `data/processed/intermediate/augmentation/train_augmented_clean.json` |
+| 增强审计报告 | `data/processed/intermediate/augmentation/augmentation_report.json` |
+| 统一修复数据 | `data/processed/train_repairs_unified.json` |
+| 最终清洗增强训练集 | `data/processed/train_clean_augmented.json` |
+
 ### 配置管理
 
 所有超参通过 `configs/*.yaml` 管理，支持继承和命令行覆盖：

@@ -20,7 +20,7 @@ echo " 表达式数据构建"
 echo " 模式: $MODE"
 echo "=============================="
 
-mkdir -p data/processed
+mkdir -p data/processed data/processed/intermediate/quality
 
 if [ "$MODE" = "correct" ] || [ "$MODE" = "wrong" ]; then
     if [ -z "$API_KEY" ]; then
@@ -46,7 +46,7 @@ elif [ "$MODE" = "convert_dpo" ]; then
 
 elif [ "$MODE" = "export_failed" ]; then
     python -m src.data.expr_builder export_failed
-    echo "审计候选已导出: data/processed/quality_candidates.json"
+    echo "审计候选已导出: data/processed/intermediate/quality/quality_candidates.json"
     echo "下一步: bash scripts/run_quality_audit.sh"
 
 else
