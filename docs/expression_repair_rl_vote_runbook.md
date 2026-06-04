@@ -40,6 +40,14 @@ env no_proxy='localhost,127.0.0.1,::1' NO_PROXY='localhost,127.0.0.1,::1' bash s
 
 本次真实 API 修复结果：原安全样本 10702 条，API 修复成功 245 条，最终安全样本 10947 条，剩余 rejected 1052 条；安全样本复验 0 违规。报告记录 API 请求 3420 次，prompt cache hit tokens 801664，miss tokens 333258。
 
+本次数据产物 SHA256：
+
+- `data/processed/intermediate/expression_repair/expr_correct_safe.json`: `b141b716ff76c8000c7988d917cb0a86d717ca9bd472e3dfff34df2e65dbdd95`
+- `data/processed/intermediate/expression_repair/expr_repaired.json`: `4401aa1f3949a25b807f423c02b2b82e6112f6162f69489d493873c4deddc12c`
+- `data/processed/intermediate/expression_repair/expr_rejected.json`: `9c1827e2150020eb67b8a3d1130ffcf5579806f9d0f3215c95e6233388379841`
+- `data/processed/intermediate/expression_repair/expr_repair_report.json`: `f98522b1c7631691645c0ec65d5a386d01c10351332d08b2df4caf9146b9c45a`
+- `data/processed/train_expr_safe.json`: `cd8df49bab3b67523890fdc0310a08480deee4623bf6b27917e5c6da05c0d502`
+
 ## 表达式实验矩阵
 
 ```bash
