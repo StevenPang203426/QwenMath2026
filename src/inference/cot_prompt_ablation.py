@@ -830,7 +830,7 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Few-shot CoT prompt ablation for SFT/DPO/GRPO adapters")
-    parser.add_argument("--val", default="data/splits/val_split.json")
+    parser.add_argument("--val", default="data/splits/train_expr_clean_val.json")
     parser.add_argument("--test", default="data/raw/test.json")
     parser.add_argument("--output_dir", default="outputs/evaluation/cot_prompt_ablation")
     parser.add_argument("--models", default="sft_cot,dpo,grpo")
