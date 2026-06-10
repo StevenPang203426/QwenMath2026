@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import math
+import numbers
 import operator
 import re
 from dataclasses import dataclass
@@ -72,6 +73,25 @@ _ROUND_PATTERNS = [
     (re.compile(r"保留[到]?[两二2][位]小数|精确到0\.01|精确到百分位|保留[到]?小数点后[两二2]位"), 2),
     (re.compile(r"保留[到]?[三3][位]小数|精确到0\.001|精确到千分位|保留[到]?小数点后[三3]位"), 3),
 ]
+
+_NONFINITE_ANSWERS = {
+    "inf",
+    "+inf",
+    "-inf",
+    "infinity",
+    "+infinity",
+    "-infinity",
+    "nan",
+    "+nan",
+    "-nan",
+    "∞",
+    "+∞",
+    "-∞",
+}
+
+
+def is_finite_real_number(value: Any) -> bool:
+    return isinstance(value, numbers.Real) and math.isfinite(float(value))
 
 _UNITS = [
     "平方厘米",
@@ -241,16 +261,23 @@ def parse_numeric(answer: str) -> float | None:
     text = str(answer).strip()
     if not text:
         return None
+    if text.lower() in _NONFINITE_ANSWERS:
+        return None
     pct_match = re.match(r"^(-?\d+\.?\d*)%$", text)
     if pct_match:
-        return float(pct_match.group(1))
+        value = float(pct_match.group(1))
+        return value if math.isfinite(value) else None
     frac_match = re.match(r"^(-?\d+)/(\d+)$", text)
     if frac_match:
         numerator = int(frac_match.group(1))
         denominator = int(frac_match.group(2))
-        return numerator / denominator if denominator != 0 else None
+        if denominator == 0:
+            return None
+        value = numerator / denominator
+        return value if math.isfinite(value) else None
     try:
-        return float(text)
+        value = float(text)
+        return value if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
 
@@ -260,6 +287,8 @@ def normalize_answer_for_question(raw_answer: str, question: Any) -> str:
         return "0"
     raw_text = str(raw_answer).strip()
     answer = basic_clean_answer(raw_text)
+    if answer.lower() in _NONFINITE_ANSWERS:
+        return "0"
     if re.search(r"\d+\s*月\s*\d+", raw_text):
         return final_clean_answer(answer)
 
@@ -295,6 +324,8 @@ def _is_already_formatted(answer: str, answer_type: str) -> bool:
 
 
 def format_percentage(value: float, question: Any) -> str:
+    if not is_finite_real_number(value):
+        return "0"
     if value > 1:
         pct_value = value
     elif 0 < value <= 1:
@@ -326,6 +357,8 @@ def detect_percentage_precision(question: Any) -> int | None:
 
 
 def format_fraction(value: float) -> str:
+    if not is_finite_real_number(value):
+        return "0"
     if value == int(value):
         return str(int(value))
     frac = Fraction(value).limit_denominator(100)
@@ -333,6 +366,8 @@ def format_fraction(value: float) -> str:
 
 
 def format_rounded(value: float, digits: int) -> str:
+    if not is_finite_real_number(value):
+        return "0"
     if digits == 0:
         rounded = Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         return str(int(rounded))
@@ -342,6 +377,8 @@ def format_rounded(value: float, digits: int) -> str:
 
 
 def format_auto(value: float) -> str:
+    if not is_finite_real_number(value):
+        return "0"
     if value == int(value):
         return str(int(value))
     return f"{value:.6f}".rstrip("0").rstrip(".")

@@ -30,7 +30,7 @@
 
 训练阶段
 ├── CoT 路线：SFT → DPO → GRPO（5 维奖励函数）
-└── 表达式路线：SFT → GRPO（4 维奖励函数）            [新增]
+└── 表达式路线：SFT → GRPO（6 维奖励函数）            [新增]
 
 推理阶段
 ├── 自适应 Prompt（题目类型检测 → 格式约束注入）        [新增]
@@ -122,16 +122,18 @@
 - 自动重算机制：不合规记录最多重算 3 次
 - 正确表达式 → SFT 训练数据；错误表达式 → DPO rejected
 
-#### 3.6.2 表达式 GRPO 4 维奖励函数
+#### 3.6.2 表达式 GRPO 6 维奖励函数
 
 **文件：** `src/models/reward_expr.py`
 
 | 维度 | 范围 | 说明 |
 |------|------|------|
-| R1 eval 正确性 | -0.5 ~ +1.0 | eval(expr)==gold → +1.0 |
-| R2 可解析性 | 0.0 ~ +0.3 | eval 不报错 → +0.3 |
+| R1 eval 正确性 | -0.6 ~ +1.0 | eval(expr)==gold → +1.0 |
+| R2 可解析性 | -0.3 ~ +0.3 | eval 不报错 → +0.3 |
 | R3 格式标签 | 0.0 ~ +0.2 | `<expr></expr><answer></answer>` 全有 |
 | R4 无非法字符 | -0.3 ~ 0.0 | 含中文/字母/LaTeX → -0.3 |
+| R5 answer 一致性 | -0.2 ~ +0.2 | `<answer>` 与表达式题意归一结果一致 |
+| R6 输出洁净 | -0.2 ~ 0.0 | 标签外解释或超长输出 → -0.2 |
 
 #### 3.6.3 表达式推理
 
@@ -183,7 +185,7 @@
 | 文件 | 类型 | 说明 |
 |------|------|------|
 | `src/models/reward.py` | 重写 | CoT 5 维 GRPO 奖励函数 |
-| `src/models/reward_expr.py` | 新建 | 表达式 4 维 GRPO 奖励函数 |
+| `src/models/reward_expr.py` | 新建 | 表达式 6 维 GRPO 奖励函数 |
 | `src/data/expr_builder.py` | 新建 | 表达式数据构建 + safe_eval + API 调用 |
 | `src/inference/answer_postprocessor.py` | 新建 | 答案后处理规则引擎 |
 | `src/inference/question_classifier.py` | 新建 | 题目类型分类器 + 自适应 Prompt |

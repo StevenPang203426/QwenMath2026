@@ -294,6 +294,8 @@ token 主要来自大模型回退增强，应作为可选流程：
 
 建议最终合并文件：`data/processed/train_clean_augmented.json`
 
+合并统计报告：`data/processed/train_clean_augmented_report.json`
+
 合并来源：
 
 - 原始高可信题：`source="raw_ok"`
@@ -313,6 +315,24 @@ token 主要来自大模型回退增强，应作为可选流程：
 | `llm_augment` | 0.6 |
 
 第一版如果训练代码不支持样本权重，则只保留 `source` 字段用于后续统计。
+
+当前已执行合并结果：
+
+| 来源 | 含义 | 条数 | 占比 |
+|------|------|------|------|
+| `raw_ok` | 原始合格数据 | 10599 | 89.13% |
+| `auto_repair` | 题意修复数据 | 347 | 2.92% |
+| `expr_format_repair` | 表达式结果规范修复数据 | 279 | 2.35% |
+| `rule_augment` | 增强后的合格数据 | 666 | 5.60% |
+| **合计** | 最终清洗增强训练集 | **11891** | **100.00%** |
+
+统一修复数据 `data/processed/train_repairs_unified.json` 共 626 条，其中题意修复 347 条、表达式结果规范修复 279 条。合并时修复数据优先于原始题，增强数据只保留通过同源替换审计的 `rule_augment` 样本。
+
+拒绝数据处置：
+
+- `expr_format_rejected.json` 中未通过题意归一匹配的数据不进入训练集，只保留为人工抽样审阅池。
+- `expr_rejected.json` 中安全表达式修复失败的数据不进入 `train_expr_safe.json`，也不进入最终清洗增强训练集。
+- 不继续大规模自动修复长尾 reject；下一步优先使用当前 clean merge 产物训练，并按 reject 原因抽样补规则。
 
 ---
 

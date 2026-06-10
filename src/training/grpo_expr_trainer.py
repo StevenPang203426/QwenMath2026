@@ -1,6 +1,6 @@
 """
 表达式方案 GRPO 训练模块
-使用 trl.GRPOTrainer + 表达式专用 4 维奖励函数
+使用 trl.GRPOTrainer + 表达式专用 6 维奖励函数
 """
 import json
 import logging
@@ -94,6 +94,11 @@ def train_grpo_expr(config_path: str) -> None:
     # 加载数据
     train_dataset = _build_expr_grpo_dataset(config.data.train_path, tokenizer)
     logger.info(f"表达式 GRPO 训练集大小: {len(train_dataset)}")
+    eval_dataset = None
+    val_path = getattr(config.data, "val_path", "")
+    if val_path:
+        eval_dataset = _build_expr_grpo_dataset(val_path, tokenizer)
+        logger.info(f"表达式 GRPO 验证集大小: {len(eval_dataset)}")
 
     # 构建表达式专用奖励函数
     reward_funcs = build_expr_reward_funcs()
@@ -105,16 +110,21 @@ def train_grpo_expr(config_path: str) -> None:
         "per_device_train_batch_size": config.training.per_device_train_batch_size,
         "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
         "num_train_epochs": config.training.num_train_epochs,
+        "max_steps": getattr(config.training, "max_steps", -1),
         "learning_rate": config.training.learning_rate,
         "warmup_ratio": getattr(config.training, "warmup_ratio", 0.1),
         "lr_scheduler_type": getattr(config.training, "lr_scheduler_type", "cosine"),
         "logging_steps": config.training.logging_steps,
+        "save_strategy": getattr(config.training, "save_strategy", "steps"),
+        "eval_strategy": getattr(config.training, "eval_strategy", "steps"),
+        "eval_steps": getattr(config.training, "eval_steps", 100),
         "save_steps": getattr(config.training, "save_steps", 100),
         "save_total_limit": getattr(config.training, "save_total_limit", 3),
         "bf16": config.training.bf16,
         "gradient_checkpointing": getattr(config.training, "gradient_checkpointing", False),
         # GRPO 特有参数
         "num_generations": grpo_cfg.num_generations,
+        "num_generations_eval": getattr(grpo_cfg, "num_generations_eval", None),
         "max_completion_length": getattr(grpo_cfg, "max_completion_length", 128),
         "max_prompt_length": getattr(grpo_cfg, "max_prompt_length", 256),
         "temperature": grpo_cfg.temperature,
@@ -122,6 +132,11 @@ def train_grpo_expr(config_path: str) -> None:
         "report_to": "wandb",
         # 加速参数
         "use_vllm": getattr(grpo_cfg, "use_vllm", False),
+        "vllm_mode": getattr(grpo_cfg, "vllm_mode", "colocate"),
+        "vllm_gpu_memory_utilization": getattr(grpo_cfg, "vllm_gpu_memory_utilization", 0.3),
+        "vllm_max_model_length": getattr(grpo_cfg, "vllm_max_model_length", None),
+        "generation_batch_size": getattr(grpo_cfg, "generation_batch_size", None),
+        "steps_per_generation": getattr(grpo_cfg, "steps_per_generation", None),
         "dataloader_num_workers": getattr(config.training, "dataloader_num_workers", 0),
         "max_grad_norm": getattr(config.training, "max_grad_norm", 1.0),
     }
@@ -134,6 +149,8 @@ def train_grpo_expr(config_path: str) -> None:
         "train_dataset": train_dataset,
         "reward_funcs": reward_funcs,
     }
+    if eval_dataset is not None:
+        trainer_kwargs["eval_dataset"] = eval_dataset
     add_tokenizer_kwarg(GRPOTrainer, trainer_kwargs, tokenizer)
     trainer = GRPOTrainer(**filter_supported_kwargs(GRPOTrainer.__init__, trainer_kwargs))
 

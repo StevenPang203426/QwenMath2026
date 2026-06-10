@@ -205,14 +205,16 @@ user: 食堂运来105千克的萝卜，运来的青菜是萝卜的3倍，运来�
 assistant: <expr>105*3</expr><answer>315</answer>
 ```
 
-**配置（configs/sft_expr.yaml）：**
+**配置（configs/sft_expr_clean.yaml）：**
 
 ```yaml
 inherit: base
 data:
-  train_path: "data/processed/train_expr.json"
+  train_path: "data/splits/train_expr_clean_train.json"
+  val_path: "data/splits/train_expr_clean_val.json"
+  target_format: "expression"
 training:
-  output_dir: "outputs/checkpoints/sft_expr"
+  output_dir: "outputs/checkpoints/sft_expr_clean"
   num_train_epochs: 3
   per_device_train_batch_size: 8
   learning_rate: 2.0e-4
@@ -220,38 +222,40 @@ training:
 
 ### 3.2 GRPO 阶段
 
-**奖励函数（4 维，专为表达式设计）：**
+**奖励函数（6 维，专为表达式设计）：**
 
 | 维度 | 函数 | 范围 | 说明 |
 |------|------|------|------|
-| R1 eval 正确性 | `expr_correctness_fn` | -0.5 ~ +1.0 | eval(expr)==gold → +1.0，eval 结果错误 → -0.5，无法解析 → -0.5 |
-| R2 可解析性 | `expr_parseable_fn` | 0.0 ~ +0.3 | eval() 不报错 → +0.3，报错 → 0.0 |
+| R1 eval 正确性 | `expr_correctness_fn` | -0.6 ~ +1.0 | eval(expr) 后题意归一与 gold 匹配 |
+| R2 可解析性 | `expr_parseable_fn` | -0.3 ~ +0.3 | 规范表达式且可 eval |
 | R3 格式标签 | `expr_format_fn` | 0.0 ~ +0.2 | `<expr></expr><answer></answer>` 全有 → +0.2 |
 | R4 无非法字符 | `expr_clean_fn` | -0.3 ~ 0.0 | 含中文/字母/LaTeX → -0.3，否则 0.0 |
+| R5 answer 一致性 | `expr_answer_consistency_fn` | -0.2 ~ +0.2 | `<answer>` 与表达式题意归一结果一致 |
+| R6 输出洁净 | `expr_output_cleanliness_fn` | -0.2 ~ 0.0 | 标签外解释或超长输出 → -0.2 |
 
-理论总分范围：-1.3 ~ +1.5
+理论总分范围：-1.6 ~ +1.7
 
 **关键设计点：**
 
-- R1 的 eval 正确性是最重要的维度，直接使用 Python eval() 验证
-- R2 可解析性鼓励模型输出合法的 Python 表达式（即使结果不对也比不可解析好）
-- R4 惩罚非法字符，避免模型输出中文解释或 LaTeX
+- R1 的 eval 正确性是最重要的维度，只信任 `<expr>`，`<answer>` 不兜底
+- R2/R4 约束规范表达式，避免函数、比较、变量、LaTeX 等取巧写法
+- R5/R6 是防守项，约束 answer 标签自洽并减少标签外解释
 
-**配置（configs/grpo_expr.yaml）：**
+**配置（configs/grpo_expr_clean.yaml）：**
 
 ```yaml
 inherit: base
 model:
-  sft_checkpoint: "outputs/checkpoints/sft_expr/best"
+  sft_checkpoint: "outputs/checkpoints/sft_expr_clean/best"
 grpo:
   num_generations: 8
   max_new_tokens: 128        # 表达式比 CoT 短得多
   temperature: 0.8
   max_prompt_length: 256
   max_completion_length: 128
-  use_vllm: true
+  use_vllm: false
 training:
-  output_dir: "outputs/checkpoints/grpo_expr"
+  output_dir: "outputs/checkpoints/grpo_expr_clean"
   num_train_epochs: 1
   per_device_train_batch_size: 8
   gradient_accumulation_steps: 2
@@ -370,7 +374,7 @@ def final_vote(cot_grpo_ans, cot_sft_ans, expr_grpo_ans, expr_sft_ans, question)
 | 文件 | 说明 |
 |------|------|
 | `src/data/expr_builder.py` | 表达式数据构建（调用 DeepSeek API + 验证） |
-| `src/models/reward_expr.py` | 表达式 GRPO 4 维奖励函数 |
+| `src/models/reward_expr.py` | 表达式 GRPO 6 维奖励函数 |
 | `src/training/sft_expr_trainer.py` | 表达式 SFT 训练（或复用现有 sft_trainer） |
 | `src/training/grpo_expr_trainer.py` | 表达式 GRPO 训练（使用表达式专用奖励） |
 | `src/inference/expr_predictor.py` | 表达式推理 + safe_eval |

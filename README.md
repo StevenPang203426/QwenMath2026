@@ -164,6 +164,53 @@ bash scripts/run_clean_data_merge.sh
 | 增强审计报告 | `data/processed/intermediate/augmentation/augmentation_report.json` |
 | 统一修复数据 | `data/processed/train_repairs_unified.json` |
 | 最终清洗增强训练集 | `data/processed/train_clean_augmented.json` |
+| 最终合并统计报告 | `data/processed/train_clean_augmented_report.json` |
+
+当前已执行合并结果：
+
+| 来源 | 含义 | 条数 | 占比 |
+|------|------|------|------|
+| `raw_ok` | 原始合格数据 | 10599 | 89.13% |
+| `auto_repair` | 题意修复数据 | 347 | 2.92% |
+| `expr_format_repair` | 表达式结果规范修复数据 | 279 | 2.35% |
+| `rule_augment` | 增强后的合格数据 | 666 | 5.60% |
+| **合计** | 最终清洗增强训练集 | **11891** | **100.00%** |
+
+统一修复数据共 626 条，其中题意修复 347 条、表达式结果规范修复 279 条。合并时跳过原始坏题/被修复替代题 1356 条，跳过重复修复 5 条，跳过原始重复 id 44 条。
+
+### 表达式路线 SFT / RL
+
+表达式路线使用 clean 数据中可复验的安全表达式子集，训练模型输出 `<expr>...</expr><answer>...</answer>`，最终答案仍以表达式 eval 后题意归一为准。
+
+```bash
+# 1. 从 clean 合并数据中过滤安全表达式，并构建固定 train/val split 与 DPO pairs
+bash scripts/run_expr_training_data.sh all
+
+# 2. 主线：Expr-SFT → Expr-GRPO
+bash scripts/run_sft_expr_clean.sh
+bash scripts/run_grpo_expr_clean.sh
+
+# 3. 加速版 GRPO：优先尝试 vLLM，异常时回退 fast
+bash scripts/run_grpo_expr_clean_vllm.sh
+bash scripts/run_grpo_expr_clean_fast.sh
+
+# 4. 消融：Expr-DPO → Expr-GRPO
+bash scripts/run_dpo_expr_clean.sh
+bash scripts/run_grpo_expr_from_dpo_clean.sh
+bash scripts/run_grpo_expr_from_dpo_clean_vllm.sh
+bash scripts/run_grpo_expr_from_dpo_clean_fast.sh
+```
+
+`grpo_expr_clean_vllm` 和 `grpo_expr_from_dpo_clean_vllm` 使用 vLLM rollout 加速；当前环境 `vLLM=0.21.0` 超出 TRL 声明的 `0.12.0~0.18.0` 支持范围，但已通过本机 1-step smoke。若需强制版本检查，可设置 `STRICT_VLLM_VERSION=1`。`*_fast` 不使用 vLLM，主要通过 `max_completion_length=96`、关闭训练中 eval、降低保存频率、调整 microbatch 来加速。
+
+当前表达式训练数据：
+
+| 产物 | 路径 | 条数 |
+|------|------|------|
+| clean 表达式全集 | `data/processed/train_expr_clean.json` | 11478 |
+| SFT/GRPO train split | `data/splits/train_expr_clean_train.json` | 10331 |
+| SFT/GRPO val split | `data/splits/train_expr_clean_val.json` | 1147 |
+| DPO clean pairs | `data/processed/train_expr_dpo_clean.json` | 9095 |
 
 ### 配置管理
 

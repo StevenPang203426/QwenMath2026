@@ -23,6 +23,7 @@ class MathDataset(Dataset):
         tokenizer,
         max_length: int = 512,
         use_cot: bool = False,
+        target_format: str = "auto",
     ):
         """
         Args:
@@ -36,6 +37,7 @@ class MathDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.use_cot = use_cot
+        self.target_format = target_format
 
     def __len__(self) -> int:
         return len(self.data)
@@ -53,7 +55,9 @@ class MathDataset(Dataset):
         )
 
         # 构建 response
-        if self.use_cot and "cot" in item:
+        if self.target_format == "expression":
+            response = f"<expr>{item['expression']}</expr><answer>{item['answer']}</answer>"
+        elif self.use_cot and "cot" in item:
             response = f"<think>{item['cot']}</think><answer>{item['answer']}</answer>"
         else:
             response = str(item["answer"])

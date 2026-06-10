@@ -1,0 +1,43 @@
+# ============================================================
+# grpo_expr_clean_vllm.yaml — 表达式路线 GRPO vLLM 加速
+# ============================================================
+inherit: base
+
+data:
+  train_path: "data/splits/train_expr_clean_train.json"
+  val_path: "data/splits/train_expr_clean_val.json"
+
+model:
+  sft_checkpoint: "outputs/checkpoints/sft_expr_clean/best"
+
+grpo:
+  num_generations: 8
+  num_generations_eval: 4
+  max_new_tokens: 96
+  temperature: 0.8
+  top_p: 0.95
+  max_prompt_length: 192
+  max_completion_length: 96
+  use_vllm: true
+  vllm_mode: "colocate"
+  vllm_gpu_memory_utilization: 0.3
+  vllm_max_model_length: 256
+
+training:
+  output_dir: "outputs/checkpoints/grpo_expr_clean_vllm"
+  num_train_epochs: 1
+  per_device_train_batch_size: 16
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: false
+  learning_rate: 5.0e-6
+  warmup_ratio: 0.1
+  lr_scheduler_type: "cosine"
+  dataloader_num_workers: 4
+  eval_strategy: "no"
+  save_steps: 500
+  eval_steps: 500
+  max_grad_norm: 0.1
+
+logging:
+  run_name: "grpo-expr-clean-vllm"
+  tags: ["grpo", "expression", "clean-data", "vllm", "fast", "6-reward"]

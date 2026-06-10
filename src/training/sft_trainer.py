@@ -18,6 +18,7 @@ from src.utils.seed import set_seed
 from src.utils.logger import setup_wandb, finish_wandb
 from src.utils.metrics import compute_accuracy
 from src.data.answer_extractor import extract_answer
+from src.inference.expr_predictor import expr_predict_single
 
 logger = logging.getLogger("math_solver.sft_trainer")
 
@@ -25,11 +26,12 @@ logger = logging.getLogger("math_solver.sft_trainer")
 class EvalAccuracyCallback(TrainerCallback):
     """在验证时计算正确率的回调"""
 
-    def __init__(self, val_data, model, tokenizer, use_cot=False):
+    def __init__(self, val_data, model, tokenizer, use_cot=False, target_format="auto"):
         self.val_data = val_data
         self.model = model
         self.tokenizer = tokenizer
         self.use_cot = use_cot
+        self.target_format = target_format
 
     def on_evaluate(self, args, state, control, **kwargs):
         """评估时采样部分验证集计算正确率"""
@@ -54,7 +56,7 @@ class EvalAccuracyCallback(TrainerCallback):
                 inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
                 outputs = self.model.generate(
                     inputs.input_ids,
-                    max_new_tokens=256 if not self.use_cot else 512,
+                    max_new_tokens=128 if self.target_format == "expression" else (512 if self.use_cot else 256),
                     do_sample=False,
                 )
                 response = self.tokenizer.decode(
@@ -62,7 +64,9 @@ class EvalAccuracyCallback(TrainerCallback):
                     skip_special_tokens=True,
                 )
 
-                if self.use_cot:
+                if self.target_format == "expression":
+                    pred = expr_predict_single(response, item["question"])["answer"]
+                elif self.use_cot:
                     pred = extract_answer(response)
                 else:
                     pred = response.strip()
@@ -115,8 +119,9 @@ def train_sft(config_path: str) -> None:
         target_modules=config.lora.target_modules,
     )
 
-    # 判断是否使用 CoT
-    use_cot = "cot" in config.data.train_path
+    # 判断训练目标格式
+    target_format = getattr(config.data, "target_format", "auto")
+    use_cot = target_format == "cot" or (target_format == "auto" and "cot" in config.data.train_path)
 
     # 加载数据
     train_dataset = MathDataset(
@@ -124,15 +129,26 @@ def train_sft(config_path: str) -> None:
         tokenizer=tokenizer,
         max_length=config.data.max_length,
         use_cot=use_cot,
+        target_format=target_format,
     )
-    logger.info(f"训练集大小: {len(train_dataset)}, 使用 CoT: {use_cot}")
+    logger.info(f"训练集大小: {len(train_dataset)}, 目标格式: {target_format}, 使用 CoT: {use_cot}")
 
     # 加载验证数据（如果有）
     val_data = None
-    val_path = config.data.train_path.replace("train", "val").replace("raw/", "splits/")
+    val_dataset = None
+    val_path = getattr(config.data, "val_path", "")
+    if not val_path:
+        val_path = config.data.train_path.replace("train", "val").replace("raw/", "splits/")
     try:
         with open(val_path, "r", encoding="utf-8") as f:
             val_data = json.load(f)
+        val_dataset = MathDataset(
+            data_path=val_path,
+            tokenizer=tokenizer,
+            max_length=config.data.max_length,
+            use_cot=use_cot,
+            target_format=target_format,
+        )
         logger.info(f"验证集大小: {len(val_data)}")
     except FileNotFoundError:
         logger.info("未找到验证集，跳过验证")
@@ -147,9 +163,16 @@ def train_sft(config_path: str) -> None:
         warmup_ratio=getattr(config.training, "warmup_ratio", 0.05),
         lr_scheduler_type=getattr(config.training, "lr_scheduler_type", "cosine"),
         logging_steps=config.training.logging_steps,
+        eval_strategy=getattr(config.training, "eval_strategy", "steps" if val_dataset else "no"),
+        eval_steps=getattr(config.training, "eval_steps", 500),
         save_strategy=getattr(config.training, "save_strategy", "steps"),
         save_steps=getattr(config.training, "save_steps", 500),
         save_total_limit=getattr(config.training, "save_total_limit", 3),
+        per_device_eval_batch_size=getattr(
+            config.training,
+            "per_device_eval_batch_size",
+            config.training.per_device_train_batch_size,
+        ),
         bf16=config.training.bf16,
         gradient_checkpointing=config.training.gradient_checkpointing,
         report_to="wandb",
@@ -159,13 +182,14 @@ def train_sft(config_path: str) -> None:
     # 回调
     callbacks = []
     if val_data:
-        callbacks.append(EvalAccuracyCallback(val_data, model, tokenizer, use_cot))
+        callbacks.append(EvalAccuracyCallback(val_data, model, tokenizer, use_cot, target_format))
 
     # 训练器
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
+        eval_dataset=val_dataset,
         data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True),
         callbacks=callbacks,
     )

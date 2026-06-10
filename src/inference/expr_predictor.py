@@ -5,6 +5,8 @@
 """
 import re
 import logging
+import math
+import numbers
 from typing import Optional
 
 from src.data.expr_builder import safe_eval
@@ -28,6 +30,10 @@ def extract_expr_from_output(text: str) -> str:
     return ""
 
 
+def _is_real_finite_number(value) -> bool:
+    return isinstance(value, numbers.Real) and math.isfinite(float(value))
+
+
 def eval_expression(expr_str: str) -> Optional[float]:
     """
     安全计算表达式
@@ -41,7 +47,10 @@ def eval_expression(expr_str: str) -> Optional[float]:
         return None
     expr_clean = expr_str.replace('^', '**').replace('×', '*').replace('÷', '/')
     try:
-        return safe_eval(expr_clean)
+        result = safe_eval(expr_clean)
+        if not _is_real_finite_number(result):
+            raise ValueError(f"Non-real or non-finite result: {result!r}")
+        return result
     except Exception as e:
         logger.debug(f"eval 失败: {expr_str!r} -> {e}")
         return None
@@ -49,6 +58,8 @@ def eval_expression(expr_str: str) -> Optional[float]:
 
 def format_eval_result(result: float) -> str:
     """将 eval 结果转为字符串"""
+    if not _is_real_finite_number(result):
+        raise ValueError(f"Non-real or non-finite result: {result!r}")
     if result == int(result):
         return str(int(result))
     return str(result)

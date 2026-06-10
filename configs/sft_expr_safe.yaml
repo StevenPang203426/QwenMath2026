@@ -5,6 +5,8 @@ inherit: base
 
 data:
   train_path: "data/processed/train_expr_safe.json"
+  target_format: "expression"
+  max_length: 256
 
 training:
   output_dir: "outputs/checkpoints/sft_expr_safe"

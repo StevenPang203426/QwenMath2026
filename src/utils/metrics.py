@@ -1,6 +1,7 @@
 """
 评测指标模块
 """
+import math
 import re
 import json
 from typing import Optional
@@ -13,7 +14,11 @@ def _values_equal(a: Optional[str], b: Optional[str], tol: float = 1e-6) -> bool
     if a == b:
         return True
     try:
-        return abs(float(a) - float(b)) < tol
+        a_float = float(a)
+        b_float = float(b)
+        if not math.isfinite(a_float) or not math.isfinite(b_float):
+            return False
+        return abs(a_float - b_float) < tol
     except (ValueError, TypeError):
         return False
 
@@ -38,7 +43,12 @@ def normalize_number(text: str) -> Optional[str]:
     if frac_match:
         num, den = int(frac_match.group(1)), int(frac_match.group(2))
         if den != 0:
-            result = num / den
+            try:
+                result = num / den
+            except OverflowError:
+                return None
+            if not math.isfinite(result):
+                return None
             # 如果是整数结果，返回整数形式
             if result == int(result):
                 return str(int(result))
@@ -47,12 +57,15 @@ def normalize_number(text: str) -> Optional[str]:
     # 处理百分数（如 25%）
     pct_match = re.match(r'^(-?\d+\.?\d*)%$', text)
     if pct_match:
-        return str(float(pct_match.group(1)))
+        value = float(pct_match.group(1))
+        return str(value) if math.isfinite(value) else None
 
     # 处理普通数字
     num_match = re.match(r'^(-?\d+\.?\d*)$', text)
     if num_match:
         val = float(num_match.group(1))
+        if not math.isfinite(val):
+            return None
         if val == int(val):
             return str(int(val))
         return str(val)

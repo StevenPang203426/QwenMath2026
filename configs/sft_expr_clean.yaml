@@ -1,16 +1,16 @@
 # ============================================================
-# sft_expr.yaml — 表达式方案 SFT 训练
-# 让模型学会输出可计算的中缀数学表达式
+# sft_expr_clean.yaml — 表达式路线 SFT（clean 安全表达式数据）
 # ============================================================
 inherit: base
 
 data:
-  train_path: "data/processed/train_expr.json"
+  train_path: "data/splits/train_expr_clean_train.json"
+  val_path: "data/splits/train_expr_clean_val.json"
   target_format: "expression"
   max_length: 256
 
 training:
-  output_dir: "outputs/checkpoints/sft_expr"
+  output_dir: "outputs/checkpoints/sft_expr_clean"
   num_train_epochs: 3
   per_device_train_batch_size: 8
   gradient_accumulation_steps: 2
@@ -19,8 +19,8 @@ training:
   lr_scheduler_type: "cosine"
   save_steps: 500
   eval_steps: 500
-  gradient_checkpointing: false       # 32GB 显存充裕
+  gradient_checkpointing: false
 
 logging:
-  run_name: "sft-expr"
-  tags: ["sft", "expression"]
+  run_name: "sft-expr-clean"
+  tags: ["sft", "expression", "clean-data"]

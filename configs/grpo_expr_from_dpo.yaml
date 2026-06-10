@@ -1,6 +1,6 @@
 # ============================================================
 # grpo_expr_from_dpo.yaml — 表达式方案 DPO→GRPO 训练
-# 四维奖励：eval正确性 / 可解析性 / 格式标签 / 无非法字符
+# 六维奖励：eval正确性 / 可解析性 / 格式标签 / 无非法字符 / answer一致性 / 输出洁净
 # ============================================================
 inherit: base
 
@@ -17,16 +17,11 @@ grpo:
   top_p: 0.95
   max_prompt_length: 256
   max_completion_length: 128
-  use_vllm: true
+  use_vllm: false
 
 # 奖励函数由 src/models/reward_expr.py 的 build_expr_reward_funcs() 构建
-# 4 个独立函数，TRL 自动求和 + 分维度日志
-# 各维度分数范围：
-#   R1 eval正确性:  -0.5 ~ +1.0
-#   R2 可解析性:     0.0 ~ +0.3
-#   R3 格式标签:     0.0 ~ +0.2
-#   R4 无非法字符:  -0.3 ~  0.0
-# 理论总分：-1.1 ~ +1.5
+# 6 个独立函数，TRL 自动求和 + 分维度日志
+# 理论总分：-1.6 ~ +1.7
 
 training:
   output_dir: "outputs/checkpoints/grpo_expr_from_dpo"
