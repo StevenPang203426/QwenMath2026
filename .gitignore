@@ -62,3 +62,9 @@ data/splits/*.json
 
 # 提交结果
 outputs/submissions/*.csv
+
+# docs
+
+docs/
+outputs/
+data/processed/intermediate/
