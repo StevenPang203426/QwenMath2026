@@ -16,7 +16,7 @@ import logging
 import math
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Callable
 
 from tqdm import tqdm
 
@@ -38,6 +38,7 @@ MODEL_SPECS: dict[str, dict[str, str]] = {
 }
 
 PROMPT_NAMES = ["direct", "zero_shot_cot", "few_shot_cot"]
+ENGINE_NAMES = ["vllm", "hf"]
 
 DIRECT_INSTRUCTION = (
     "请直接给出最终答案，不要展开推理过程。"
@@ -150,6 +151,99 @@ def build_chat_prompts(tokenizer: Any, questions: list[str], prompt_name: str) -
         messages = build_prompt_messages(prompt_name, question)
         prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
     return prompts
+
+
+def count_prompt_tokens(tokenizer: Any, prompts: list[str]) -> list[int]:
+    if not prompts:
+        return []
+    encoded = tokenizer(prompts, add_special_tokens=False)
+    input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
+    return [len(ids) for ids in input_ids]
+
+
+def build_vllm_sampling_params(max_new_tokens: int, temperature: float, do_sample: bool):
+    from vllm import SamplingParams
+
+    return SamplingParams(
+        max_tokens=max_new_tokens,
+        temperature=temperature if do_sample else 0.0,
+    )
+
+
+def generate_raw_outputs_vllm_batch(
+    llm: Any,
+    tokenizer: Any,
+    questions: list[str],
+    prompt_name: str,
+    max_new_tokens: int,
+    temperature: float,
+    do_sample: bool,
+    lora_request: Any,
+    show_progress: bool,
+    sampling_params_factory: Callable[..., Any] = build_vllm_sampling_params,
+) -> tuple[list[str], list[int]]:
+    if not questions:
+        return [], []
+    prompts = build_chat_prompts(tokenizer, questions, prompt_name)
+    prompt_tokens = count_prompt_tokens(tokenizer, prompts)
+    sampling_params = sampling_params_factory(
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        do_sample=do_sample,
+    )
+    outputs = llm.generate(
+        prompts,
+        sampling_params=sampling_params,
+        use_tqdm=show_progress,
+        lora_request=lora_request,
+    )
+    raw_outputs = [item.outputs[0].text if item.outputs else "" for item in outputs]
+    return raw_outputs, prompt_tokens
+
+
+def load_vllm_model_and_tokenizer(
+    base_model_name: str,
+    gpu_memory_utilization: float,
+    max_lora_rank: int,
+    max_model_len: int,
+    max_num_seqs: int,
+    enforce_eager: bool,
+) -> tuple[Any, Any]:
+    from transformers import AutoTokenizer
+    from vllm import LLM
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        base_model_name,
+        use_fast=False,
+        trust_remote_code=True,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    llm = LLM(
+        model=base_model_name,
+        tokenizer=base_model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        enable_lora=True,
+        max_lora_rank=max_lora_rank,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        enforce_eager=enforce_eager,
+        disable_log_stats=True,
+    )
+    return llm, tokenizer
+
+
+def build_lora_request(model_name: str, adapter_path: str, lora_int_id: int) -> Any:
+    from vllm.lora.request import LoRARequest
+
+    return LoRARequest(
+        lora_name=model_name,
+        lora_int_id=lora_int_id,
+        lora_path=adapter_path,
+    )
 
 
 def generate_raw_outputs_batch(
@@ -282,6 +376,66 @@ def load_complete_details(
     return matching
 
 
+def _detail_matches_combo(item: dict[str, Any], model_name: str, prompt_name: str) -> bool:
+    return str(item.get("model", "")) == model_name and str(item.get("prompt", "")) == prompt_name
+
+
+def reusable_details_for_records(
+    details: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    model_name: str,
+    prompt_name: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    expected_ids = [str(item.get("id", "")) for item in records]
+    expected_id_set = set(expected_ids)
+    reusable_by_id: dict[str, dict[str, Any]] = {}
+    for item in details:
+        item_id = str(item.get("id", ""))
+        if item_id not in expected_id_set:
+            continue
+        if not _detail_matches_combo(item, model_name, prompt_name):
+            continue
+        reusable_by_id.setdefault(item_id, item)
+
+    reusable = [reusable_by_id[item_id] for item_id in expected_ids if item_id in reusable_by_id]
+    missing_records = [item for item in records if str(item.get("id", "")) not in reusable_by_id]
+    return reusable, missing_records
+
+
+def merge_detail_records(
+    existing: list[dict[str, Any]],
+    generated: list[dict[str, Any]],
+    model_name: str,
+    prompt_name: str,
+) -> list[dict[str, Any]]:
+    other_records = []
+    ordered_ids: list[str] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in existing:
+        item_id = str(item.get("id", ""))
+        if not item_id or not _detail_matches_combo(item, model_name, prompt_name):
+            other_records.append(item)
+            continue
+        if item_id not in by_id:
+            ordered_ids.append(item_id)
+        by_id[item_id] = item
+
+    for item in generated:
+        item_id = str(item.get("id", ""))
+        if not item_id:
+            continue
+        if item_id not in by_id:
+            ordered_ids.append(item_id)
+        by_id[item_id] = item
+
+    return other_records + [by_id[item_id] for item_id in ordered_ids]
+
+
+def order_details_for_records(records: list[dict[str, Any]], details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {str(item.get("id", "")): item for item in details}
+    return [by_id[str(item.get("id", ""))] for item in records if str(item.get("id", "")) in by_id]
+
+
 def details_to_rows(records: list[dict[str, Any]], details: list[dict[str, Any]]) -> list[list[str]]:
     by_id = {str(item["id"]): item for item in details}
     return [[str(item.get("id", "")), str(by_id.get(str(item.get("id", "")), {}).get("answer", "0"))] for item in records]
@@ -297,6 +451,9 @@ def generate_prompt_details(
     max_new_tokens: int,
     temperature: float,
     do_sample: bool,
+    engine: str = "hf",
+    lora_request: Any | None = None,
+    checkpoint_callback: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     prepared = [
         {
@@ -309,19 +466,33 @@ def generate_prompt_details(
     batches = list(iter_batches(prepared, batch_size))
     for batch in tqdm(batches, desc=f"{model_name}:{prompt_name}"):
         questions = [item["question"] for item in batch]
-        raw_outputs, prompt_tokens = generate_raw_outputs_batch(
-            model=model,
-            tokenizer=tokenizer,
-            questions=questions,
-            prompt_name=prompt_name,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=do_sample,
-        )
+        if engine == "vllm":
+            raw_outputs, prompt_tokens = generate_raw_outputs_vllm_batch(
+                llm=model,
+                tokenizer=tokenizer,
+                questions=questions,
+                prompt_name=prompt_name,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+                lora_request=lora_request,
+                show_progress=show_progress,
+            )
+        else:
+            raw_outputs, prompt_tokens = generate_raw_outputs_batch(
+                model=model,
+                tokenizer=tokenizer,
+                questions=questions,
+                prompt_name=prompt_name,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+            )
+        batch_details = []
         for item, raw_output, token_count in zip(batch, raw_outputs, prompt_tokens):
             raw_answer, extraction_level = extract_answer(raw_output, return_level=True)
             answer = normalize_answer_safe(raw_answer, item["question"])
-            details.append({
+            detail = {
                 "id": item["id"],
                 "question": item["question"],
                 "model": model_name,
@@ -334,7 +505,11 @@ def generate_prompt_details(
                 "empty_extraction": not bool(str(raw_answer).strip()),
                 "prompt_tokens": token_count,
                 "raw_length_chars": len(raw_output),
-            })
+            }
+            details.append(detail)
+            batch_details.append(detail)
+        if checkpoint_callback is not None and batch_details:
+            checkpoint_callback(details)
     return details
 
 
@@ -351,26 +526,125 @@ def prepare_dataset_details(
     do_sample: bool,
     reuse_existing: bool,
     generate_missing: bool,
+    engine: str,
+    vllm_gpu_memory_utilization: float,
+    vllm_max_lora_rank: int,
 ) -> dict[tuple[str, str], list[dict[str, Any]]]:
     details_by_combo: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    pending: dict[tuple[str, str], dict[str, Any]] = {}
     missing_by_model: dict[str, list[str]] = {}
 
     for model_name in model_names:
         for prompt_name in prompt_names:
-            details = None
-            if reuse_existing:
-                details = load_complete_details(output_dir, prefix, records, model_name, prompt_name)
-            if details is not None:
+            path = detail_file(output_dir, prefix, model_name, prompt_name)
+            existing_details: list[dict[str, Any]] = []
+            reusable: list[dict[str, Any]] = []
+            missing_records = list(records)
+            if reuse_existing and path.exists():
+                with path.open("r", encoding="utf-8") as f:
+                    existing_details = json.load(f)
+                reusable, missing_records = reusable_details_for_records(
+                    existing_details,
+                    records,
+                    model_name,
+                    prompt_name,
+                )
+                if reusable:
+                    logger.info(
+                        "Reusing %s/%s/%s cached rows: %s/%s",
+                        prefix,
+                        model_name,
+                        prompt_name,
+                        len(reusable),
+                        len(records),
+                    )
+
+            if not missing_records:
+                details = order_details_for_records(records, reusable)
                 details_by_combo[(model_name, prompt_name)] = details
                 write_csv(csv_file(output_dir, prefix, model_name, prompt_name), details_to_rows(records, details))
-            else:
-                missing_by_model.setdefault(model_name, []).append(prompt_name)
+                continue
+
+            pending[(model_name, prompt_name)] = {
+                "existing_details": existing_details,
+                "reusable": reusable,
+                "missing_records": missing_records,
+            }
+            missing_by_model.setdefault(model_name, []).append(prompt_name)
 
     missing = [(model, prompt) for model, prompts in missing_by_model.items() for prompt in prompts]
     if missing and not generate_missing:
         raise FileNotFoundError(f"Missing complete cached details: {missing}")
 
     if not missing:
+        return details_by_combo
+
+    if engine == "vllm":
+        llm, tokenizer = load_vllm_model_and_tokenizer(
+            base_model_name=base_model_name,
+            gpu_memory_utilization=vllm_gpu_memory_utilization,
+            max_lora_rank=vllm_max_lora_rank,
+        )
+        try:
+            for lora_int_id, model_name in enumerate(model_names, start=1):
+                prompt_names_to_run = missing_by_model.get(model_name, [])
+                if not prompt_names_to_run:
+                    continue
+                spec = MODEL_SPECS[model_name]
+                adapter_path = ensure_checkpoint(spec)
+                lora_request = build_lora_request(model_name, adapter_path, lora_int_id)
+                for prompt_name in prompt_names_to_run:
+                    plan = pending[(model_name, prompt_name)]
+                    missing_records = plan["missing_records"]
+                    logger.info(
+                        "Generating %s/%s/%s with vLLM for missing rows: %s/%s",
+                        prefix,
+                        model_name,
+                        prompt_name,
+                        len(missing_records),
+                        len(records),
+                    )
+                    checkpoint_path = detail_file(output_dir, prefix, model_name, prompt_name)
+
+                    def checkpoint(
+                        generated_so_far: list[dict[str, Any]],
+                        plan=plan,
+                        model_name=model_name,
+                        prompt_name=prompt_name,
+                    ) -> None:
+                        write_json(
+                            checkpoint_path,
+                            merge_detail_records(plan["existing_details"], generated_so_far, model_name, prompt_name),
+                        )
+
+                    generated = generate_prompt_details(
+                        records=missing_records,
+                        model=llm,
+                        tokenizer=tokenizer,
+                        model_name=model_name,
+                        prompt_name=prompt_name,
+                        batch_size=batch_size,
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        do_sample=do_sample,
+                        engine="vllm",
+                        lora_request=lora_request,
+                        checkpoint_callback=checkpoint,
+                    )
+                    merged_file_details = merge_detail_records(
+                        plan["existing_details"],
+                        generated,
+                        model_name,
+                        prompt_name,
+                    )
+                    details = order_details_for_records(records, merged_file_details)
+                    if len(details) != len(records):
+                        raise RuntimeError(f"Resume merge failed for {(model_name, prompt_name)}")
+                    details_by_combo[(model_name, prompt_name)] = details
+                    write_json(detail_file(output_dir, prefix, model_name, prompt_name), merged_file_details)
+                    write_csv(csv_file(output_dir, prefix, model_name, prompt_name), details_to_rows(records, details))
+        finally:
+            cleanup_model(llm)
         return details_by_combo
 
     from src.models.model_loader import load_peft_model
@@ -387,9 +661,31 @@ def prepare_dataset_details(
         model.eval()
         try:
             for prompt_name in prompt_names_to_run:
-                logger.info("Generating %s/%s/%s", prefix, model_name, prompt_name)
-                details = generate_prompt_details(
-                    records=records,
+                plan = pending[(model_name, prompt_name)]
+                missing_records = plan["missing_records"]
+                logger.info(
+                    "Generating %s/%s/%s with HF for missing rows: %s/%s",
+                    prefix,
+                    model_name,
+                    prompt_name,
+                    len(missing_records),
+                    len(records),
+                )
+                checkpoint_path = detail_file(output_dir, prefix, model_name, prompt_name)
+
+                def checkpoint(
+                    generated_so_far: list[dict[str, Any]],
+                    plan=plan,
+                    model_name=model_name,
+                    prompt_name=prompt_name,
+                ) -> None:
+                    write_json(
+                        checkpoint_path,
+                        merge_detail_records(plan["existing_details"], generated_so_far, model_name, prompt_name),
+                    )
+
+                generated = generate_prompt_details(
+                    records=missing_records,
                     model=model,
                     tokenizer=tokenizer,
                     model_name=model_name,
@@ -398,9 +694,20 @@ def prepare_dataset_details(
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     do_sample=do_sample,
+                    engine="hf",
+                    checkpoint_callback=checkpoint,
                 )
+                merged_file_details = merge_detail_records(
+                    plan["existing_details"],
+                    generated,
+                    model_name,
+                    prompt_name,
+                )
+                details = order_details_for_records(records, merged_file_details)
+                if len(details) != len(records):
+                    raise RuntimeError(f"Resume merge failed for {(model_name, prompt_name)}")
                 details_by_combo[(model_name, prompt_name)] = details
-                write_json(detail_file(output_dir, prefix, model_name, prompt_name), details)
+                write_json(detail_file(output_dir, prefix, model_name, prompt_name), merged_file_details)
                 write_csv(csv_file(output_dir, prefix, model_name, prompt_name), details_to_rows(records, details))
         finally:
             cleanup_model(model)
@@ -670,6 +977,10 @@ def build_report(
             "max_new_tokens": args.max_new_tokens,
             "temperature": args.temperature,
             "do_sample": args.do_sample,
+            "engine": args.engine,
+            "reuse_existing": not args.no_reuse_existing,
+            "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+            "vllm_max_lora_rank": args.vllm_max_lora_rank,
         },
         "validation": {
             "rows": len(val_records),
@@ -746,6 +1057,8 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
 
     model_names = parse_names(args.models, MODEL_SPECS.keys(), "models")
     prompt_names = parse_names(args.prompts, PROMPT_NAMES, "prompts")
+    if args.engine not in ENGINE_NAMES:
+        raise ValueError(f"Unknown engine: {args.engine}; available={ENGINE_NAMES}")
     val_records = load_records(args.val, args.limit)
     test_records = [] if args.skip_test else load_records(args.test, args.limit)
 
@@ -766,6 +1079,9 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
         do_sample=args.do_sample,
         reuse_existing=reuse_existing,
         generate_missing=generate_missing,
+        engine=args.engine,
+        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        vllm_max_lora_rank=args.vllm_max_lora_rank,
     )
 
     test_details = None
@@ -783,6 +1099,9 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
             do_sample=args.do_sample,
             reuse_existing=reuse_existing,
             generate_missing=generate_missing,
+            engine=args.engine,
+            vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+            vllm_max_lora_rank=args.vllm_max_lora_rank,
         )
 
     val_disagreements: list[dict[str, Any]] = []
@@ -837,9 +1156,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompts", default="direct,zero_shot_cot,few_shot_cot")
     parser.add_argument("--base_model", default="")
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--engine", choices=ENGINE_NAMES, default="vllm")
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
+    parser.add_argument("--vllm_max_lora_rank", type=int, default=16)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--no_reuse_existing", action="store_true")
