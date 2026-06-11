@@ -1,7 +1,7 @@
 # 问题与解决方案记录
 
 > 项目：CCF BDCI 小学数学应用题自动解题
-> 更新日期：2026-05-28
+> 更新日期：2026-06-11
 
 ---
 
@@ -561,6 +561,26 @@ bash scripts/run_expr_data_build.sh export_failed
 **输出文件：** `data/processed/quality_candidates.json`
 
 **下游流程：** `quality_auditor.py` 读取候选 → 大模型审计 → 高门槛修复
+
+---
+
+## 36. CoT DPO/GRPO 评测错误加载 raw base
+
+**现象：** Few-shot CoT prompt ablation 中，`dpo` 与 `grpo` 验证准确率远低于 `sft_cot`，且大量输出缺少闭合 `<answer>` 标签。典型结果中 `dpo` 只有 15%~21% 准确率，`grpo` 约 46%~51%，missing answer tag 大幅高于 SFT。
+
+**直接原因：** ablation 推理脚本把 `sft_cot`、`dpo`、`grpo` 都按 `raw Qwen base + 单个 LoRA adapter` 加载。这个方式对 `sft_cot` 正确，但对 DPO/GRPO 错误。DPO/GRPO 训练时先加载 `sft_cot` adapter 并 `merge_and_unload()` 到 base，再挂新的 LoRA 训练；因此推理时必须使用 `SFT-merged base + dpo/grpo adapter`。
+
+**影响：** 旧目录 `outputs/evaluation/cot_prompt_ablation` 中的 DPO/GRPO 结果可能低估了二阶段 checkpoint，不能直接作为是否重训的证据。
+
+**解决：**
+- `cot_prompt_ablation.py` 新增运行时模型规格解析：`sft_cot` 使用 raw base，`dpo`/`grpo` 使用 SFT-merged base。
+- 缓存 `outputs/checkpoints/sft_cot_merged`，并写入元数据；当 raw base 或 SFT adapter 指纹不一致时自动重建。
+- vLLM 按 base path 分组加载：raw base 组只跑 SFT，SFT-merged base 组复用同一个 vLLM 实例跑 DPO/GRPO LoRA。
+- 默认输出目录改为 `outputs/evaluation/cot_prompt_ablation_fixed_base`，与旧错误加载结果隔离。
+
+**重训判断：** 本次不立即重训。先用修复后的加载方式重跑 validation ablation；若 DPO/GRPO 仍缺 `<answer>` 超过 5%，或验证准确率低于 `sft_cot direct` 超过 2 个百分点，再进入对应重训计划。
+
+**次级风险：** GRPO reward 中格式奖励仅为 `+0.2` 且缺标签无负惩罚，正确性 reward 又允许从无标签文本兜底抽取答案。这会弱化 `<answer>` 约束，但属于下一阶段 reward/重训问题，不在本次修复中修改。
 
 ---
 

@@ -5,16 +5,20 @@ import sys
 
 sys.path.insert(0, ".")
 
+import src.inference.cot_prompt_ablation as ablation
 from src.inference.cot_prompt_ablation import (
+    DEFAULT_OUTPUT_DIR,
     build_parser,
     build_prompt_disagreements,
     build_prompt_messages,
     exact_sign_test_p_value,
     filter_complete_details_for_records,
     generate_raw_outputs_vllm_batch,
+    group_model_names_by_base,
     merge_detail_records,
     paired_summary,
     reusable_details_for_records,
+    resolve_model_runtime_specs,
     score_details,
 )
 
@@ -129,6 +133,38 @@ def test_resume_helpers_reuse_existing_rows_and_keep_missing_records():
     assert [item for item in merged if item["id"] == "2" and item["prompt"] == "direct"][0]["answer"] == "22"
 
 
+def test_runtime_specs_keep_sft_on_raw_base_and_rl_on_sft_merged_base():
+    original_ensure_checkpoint = ablation.ensure_checkpoint
+    calls = []
+
+    def fake_ensure_checkpoint(spec):
+        return f"resolved/{spec['name']}"
+
+    def fake_ensure_merged(base_model_name, sft_adapter_path, sft_merged_dir):
+        calls.append((base_model_name, sft_adapter_path, sft_merged_dir))
+        return sft_merged_dir
+
+    try:
+        ablation.ensure_checkpoint = fake_ensure_checkpoint
+        specs = resolve_model_runtime_specs(
+            ["sft_cot", "dpo", "grpo"],
+            raw_base_model_name="raw-base",
+            sft_merged_dir="merged-base",
+            ensure_merged_base=fake_ensure_merged,
+        )
+    finally:
+        ablation.ensure_checkpoint = original_ensure_checkpoint
+
+    assert specs["sft_cot"]["base_model_name"] == "raw-base"
+    assert specs["sft_cot"]["base_role"] == "raw"
+    assert specs["dpo"]["base_model_name"] == "merged-base"
+    assert specs["grpo"]["base_model_name"] == "merged-base"
+    assert calls == [("raw-base", "resolved/sft_cot", "merged-base")]
+
+    groups = group_model_names_by_base(["sft_cot", "dpo", "grpo"], specs)
+    assert groups == [("raw-base", ["sft_cot"]), ("merged-base", ["dpo", "grpo"])]
+
+
 def test_vllm_generation_uses_lora_request_and_counts_prompt_tokens():
     class FakeTokenizer:
         def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
@@ -169,12 +205,14 @@ def test_vllm_generation_uses_lora_request_and_counts_prompt_tokens():
         temperature=0.1,
         do_sample=False,
         lora_request=lora_request,
+        show_progress=True,
         sampling_params_factory=lambda **kwargs: kwargs,
     )
 
     assert raw_outputs == ["<answer>0</answer>", "<answer>1</answer>"]
     assert prompt_tokens == [2, 2]
     assert llm.calls[0]["lora_request"] is lora_request
+    assert llm.calls[0]["use_tqdm"] is True
     assert llm.calls[0]["sampling_params"] == {
         "max_new_tokens": 32,
         "temperature": 0.1,
@@ -184,8 +222,13 @@ def test_vllm_generation_uses_lora_request_and_counts_prompt_tokens():
 
 def test_parser_defaults_to_vllm_with_large_batch_for_ablation():
     args = build_parser().parse_args([])
+    assert args.output_dir == DEFAULT_OUTPUT_DIR
     assert args.engine == "vllm"
     assert args.batch_size == 64
+    assert args.vllm_max_model_len == 2048
+    assert args.vllm_max_num_seqs == 64
+    assert args.vllm_enforce_eager is False
+    assert args.vllm_show_progress is False
 
 
 def test_cached_full_details_can_cover_limited_subset():
@@ -208,6 +251,7 @@ if __name__ == "__main__":
     test_paired_summary_counts_prompt_wins_and_sign_test()
     test_disagreements_include_answer_or_correctness_changes()
     test_resume_helpers_reuse_existing_rows_and_keep_missing_records()
+    test_runtime_specs_keep_sft_on_raw_base_and_rl_on_sft_merged_base()
     test_vllm_generation_uses_lora_request_and_counts_prompt_tokens()
     test_parser_defaults_to_vllm_with_large_batch_for_ablation()
     test_cached_full_details_can_cover_limited_subset()

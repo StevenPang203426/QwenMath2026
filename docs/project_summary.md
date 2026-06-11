@@ -2,7 +2,7 @@
 
 > 项目：CCF BDCI 小学数学应用题自动解题
 > 模型：Qwen2.5-0.5B-Instruct + LoRA
-> 更新日期：2026-06-03
+> 更新日期：2026-06-11
 
 ---
 
@@ -15,7 +15,7 @@
 | CoT 路线 | 让模型学会逐步推理 | 推理过程 + 数字答案 | 模型直接输出 |
 | 表达式路线 | 让模型学会写数学表达式 | 中缀数学表达式 | Python eval() 精确计算 |
 
-两条路线共享 Qwen2.5-0.5B 基座模型，各自独立训练（SFT → GRPO），最终 4 模型投票融合输出最终答案。
+两条路线共享 Qwen2.5-0.5B 基座模型，各自独立训练，最终 4 模型投票融合输出最终答案。CoT 路线中的 DPO/GRPO 是二阶段 adapter：训练时先把 `sft_cot` adapter merge 到 base，再训练新的 DPO/GRPO LoRA；推理和评测时必须使用 `SFT-merged base + DPO/GRPO adapter`。
 
 ---
 
@@ -29,10 +29,11 @@
 └── 数据修复：失败数据修复、Type B/C 回收（data_repair.py）
 
 训练阶段
-├── CoT 路线：SFT → DPO → GRPO（5 维奖励函数）
+├── CoT 路线：SFT → DPO / GRPO（DPO/GRPO 均基于 SFT-merged base；GRPO 使用 5 维奖励函数）
 └── 表达式路线：SFT → GRPO（6 维奖励函数）            [新增]
 
 推理阶段
+├── CoT 二阶段 adapter 加载（DPO/GRPO = SFT-merged base + adapter）
 ├── 自适应 Prompt（题目类型检测 → 格式约束注入）        [新增]
 ├── 答案后处理（百分数/分数/取整/保留位数规则引擎）      [新增]
 ├── 表达式推理（safe_eval + fallback）                  [新增]

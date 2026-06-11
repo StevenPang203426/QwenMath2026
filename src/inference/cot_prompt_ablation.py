@@ -31,10 +31,28 @@ from src.utils.answer_normalizer import (
 
 logger = logging.getLogger("math_solver.cot_prompt_ablation")
 
+RAW_BASE_ROLE = "raw"
+SFT_MERGED_BASE_ROLE = "sft_cot_merged"
+DEFAULT_OUTPUT_DIR = "outputs/evaluation/cot_prompt_ablation_fixed_base"
+DEFAULT_SFT_MERGED_DIR = "outputs/checkpoints/sft_cot_merged"
+MERGED_BASE_METADATA_FILE = "cot_merged_base_metadata.json"
+
 MODEL_SPECS: dict[str, dict[str, str]] = {
-    "sft_cot": {"name": "sft_cot", "adapter_path": "outputs/checkpoints/sft_cot/best"},
-    "dpo": {"name": "dpo", "adapter_path": "outputs/checkpoints/dpo/best"},
-    "grpo": {"name": "grpo", "adapter_path": "outputs/checkpoints/grpo/best"},
+    "sft_cot": {
+        "name": "sft_cot",
+        "adapter_path": "outputs/checkpoints/sft_cot/best",
+        "base_role": RAW_BASE_ROLE,
+    },
+    "dpo": {
+        "name": "dpo",
+        "adapter_path": "outputs/checkpoints/dpo/best",
+        "base_role": SFT_MERGED_BASE_ROLE,
+    },
+    "grpo": {
+        "name": "grpo",
+        "adapter_path": "outputs/checkpoints/grpo/best",
+        "base_role": SFT_MERGED_BASE_ROLE,
+    },
 }
 
 PROMPT_NAMES = ["direct", "zero_shot_cot", "few_shot_cot"]
@@ -139,6 +157,123 @@ def ensure_checkpoint(spec: dict[str, str]) -> str:
     return adapter_path
 
 
+def _path_identity(value: str) -> str:
+    path = Path(value)
+    try:
+        return str(path.resolve()) if path.exists() else str(path)
+    except OSError:
+        return value
+
+
+def _adapter_fingerprint(adapter_path: str) -> list[dict[str, Any]]:
+    path = Path(adapter_path)
+    fingerprint = []
+    for name in ["adapter_config.json", "adapter_model.safetensors", "adapter_model.bin"]:
+        item = path / name
+        if not item.exists():
+            continue
+        stat = item.stat()
+        fingerprint.append({"name": name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    return fingerprint
+
+
+def _merged_base_metadata(base_model_name: str, sft_adapter_path: str) -> dict[str, Any]:
+    return {
+        "format_version": 1,
+        "base_model_name": _path_identity(base_model_name),
+        "sft_adapter_path": _path_identity(sft_adapter_path),
+        "sft_adapter_fingerprint": _adapter_fingerprint(sft_adapter_path),
+    }
+
+
+def _merged_base_metadata_path(merged_dir: str | Path) -> Path:
+    return Path(merged_dir) / MERGED_BASE_METADATA_FILE
+
+
+def is_sft_merged_base_current(merged_dir: str | Path, base_model_name: str, sft_adapter_path: str) -> bool:
+    merged_path = Path(merged_dir)
+    metadata_path = _merged_base_metadata_path(merged_path)
+    if not (merged_path / "config.json").exists() or not metadata_path.exists():
+        return False
+    try:
+        with metadata_path.open("r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return metadata == _merged_base_metadata(base_model_name, sft_adapter_path)
+
+
+def ensure_sft_cot_merged_base(
+    base_model_name: str,
+    sft_adapter_path: str,
+    merged_dir: str = DEFAULT_SFT_MERGED_DIR,
+) -> str:
+    if is_sft_merged_base_current(merged_dir, base_model_name, sft_adapter_path):
+        return str(Path(merged_dir))
+
+    from src.models.model_loader import load_peft_model
+
+    logger.info("Building SFT-merged base for RL adapters: %s", merged_dir)
+    model, tokenizer = load_peft_model(
+        base_model_name=base_model_name,
+        adapter_path=sft_adapter_path,
+        torch_dtype="bfloat16",
+        merge=True,
+    )
+    merged_path = Path(merged_dir)
+    try:
+        merged_path.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(merged_path, safe_serialization=True)
+        tokenizer.save_pretrained(merged_path)
+        write_json(_merged_base_metadata_path(merged_path), _merged_base_metadata(base_model_name, sft_adapter_path))
+    finally:
+        cleanup_model(model)
+        del tokenizer
+    return str(merged_path)
+
+
+def resolve_model_runtime_specs(
+    model_names: list[str],
+    raw_base_model_name: str,
+    sft_merged_dir: str = DEFAULT_SFT_MERGED_DIR,
+    ensure_merged_base: Callable[[str, str, str], str] = ensure_sft_cot_merged_base,
+) -> dict[str, dict[str, str]]:
+    adapter_paths = {model_name: ensure_checkpoint(MODEL_SPECS[model_name]) for model_name in model_names}
+    needs_sft_merged = any(MODEL_SPECS[model_name].get("base_role") == SFT_MERGED_BASE_ROLE for model_name in model_names)
+    sft_merged_base = ""
+    if needs_sft_merged:
+        sft_adapter_path = adapter_paths.get("sft_cot") or ensure_checkpoint(MODEL_SPECS["sft_cot"])
+        sft_merged_base = ensure_merged_base(raw_base_model_name, sft_adapter_path, sft_merged_dir)
+
+    runtime_specs: dict[str, dict[str, str]] = {}
+    for model_name in model_names:
+        spec = MODEL_SPECS[model_name]
+        base_role = spec.get("base_role", RAW_BASE_ROLE)
+        base_model_name = raw_base_model_name if base_role == RAW_BASE_ROLE else sft_merged_base
+        runtime_specs[model_name] = {
+            **spec,
+            "adapter_path": adapter_paths[model_name],
+            "base_model_name": base_model_name,
+            "base_role": base_role,
+        }
+    return runtime_specs
+
+
+def group_model_names_by_base(
+    model_names: list[str],
+    runtime_specs: dict[str, dict[str, str]],
+) -> list[tuple[str, list[str]]]:
+    groups: list[tuple[str, list[str]]] = []
+    grouped: dict[str, list[str]] = {}
+    for model_name in model_names:
+        base_model_name = runtime_specs[model_name]["base_model_name"]
+        if base_model_name not in grouped:
+            grouped[base_model_name] = []
+            groups.append((base_model_name, grouped[base_model_name]))
+        grouped[base_model_name].append(model_name)
+    return groups
+
+
 def iter_batches(items: list[dict[str, Any]], batch_size: int) -> Iterable[list[dict[str, Any]]]:
     batch_size = max(1, batch_size)
     for start in range(0, len(items), batch_size):
@@ -179,7 +314,7 @@ def generate_raw_outputs_vllm_batch(
     temperature: float,
     do_sample: bool,
     lora_request: Any,
-    show_progress: bool,
+    show_progress: bool = False,
     sampling_params_factory: Callable[..., Any] = build_vllm_sampling_params,
 ) -> tuple[list[str], list[int]]:
     if not questions:
@@ -454,6 +589,9 @@ def generate_prompt_details(
     engine: str = "hf",
     lora_request: Any | None = None,
     checkpoint_callback: Callable[[list[dict[str, Any]]], None] | None = None,
+    show_progress: bool = False,
+    model_base_name: str = "",
+    model_base_role: str = "",
 ) -> list[dict[str, Any]]:
     prepared = [
         {
@@ -505,6 +643,8 @@ def generate_prompt_details(
                 "empty_extraction": not bool(str(raw_answer).strip()),
                 "prompt_tokens": token_count,
                 "raw_length_chars": len(raw_output),
+                "base_model_name": model_base_name,
+                "base_role": model_base_role,
             }
             details.append(detail)
             batch_details.append(detail)
@@ -519,7 +659,7 @@ def prepare_dataset_details(
     prefix: str,
     model_names: list[str],
     prompt_names: list[str],
-    base_model_name: str,
+    runtime_specs: dict[str, dict[str, str]],
     batch_size: int,
     max_new_tokens: int,
     temperature: float,
@@ -529,6 +669,10 @@ def prepare_dataset_details(
     engine: str,
     vllm_gpu_memory_utilization: float,
     vllm_max_lora_rank: int,
+    vllm_max_model_len: int,
+    vllm_max_num_seqs: int,
+    vllm_enforce_eager: bool,
+    vllm_show_progress: bool,
 ) -> dict[tuple[str, str], list[dict[str, Any]]]:
     details_by_combo: dict[tuple[str, str], list[dict[str, Any]]] = {}
     pending: dict[tuple[str, str], dict[str, Any]] = {}
@@ -580,81 +724,97 @@ def prepare_dataset_details(
         return details_by_combo
 
     if engine == "vllm":
-        llm, tokenizer = load_vllm_model_and_tokenizer(
-            base_model_name=base_model_name,
-            gpu_memory_utilization=vllm_gpu_memory_utilization,
-            max_lora_rank=vllm_max_lora_rank,
-        )
-        try:
-            for lora_int_id, model_name in enumerate(model_names, start=1):
-                prompt_names_to_run = missing_by_model.get(model_name, [])
-                if not prompt_names_to_run:
-                    continue
-                spec = MODEL_SPECS[model_name]
-                adapter_path = ensure_checkpoint(spec)
-                lora_request = build_lora_request(model_name, adapter_path, lora_int_id)
-                for prompt_name in prompt_names_to_run:
-                    plan = pending[(model_name, prompt_name)]
-                    missing_records = plan["missing_records"]
-                    logger.info(
-                        "Generating %s/%s/%s with vLLM for missing rows: %s/%s",
-                        prefix,
-                        model_name,
-                        prompt_name,
-                        len(missing_records),
-                        len(records),
-                    )
-                    checkpoint_path = detail_file(output_dir, prefix, model_name, prompt_name)
-
-                    def checkpoint(
-                        generated_so_far: list[dict[str, Any]],
-                        plan=plan,
-                        model_name=model_name,
-                        prompt_name=prompt_name,
-                    ) -> None:
-                        write_json(
-                            checkpoint_path,
-                            merge_detail_records(plan["existing_details"], generated_so_far, model_name, prompt_name),
+        lora_int_id = 1
+        for base_model_name, grouped_model_names in group_model_names_by_base(model_names, runtime_specs):
+            grouped_missing = [model_name for model_name in grouped_model_names if model_name in missing_by_model]
+            if not grouped_missing:
+                continue
+            llm, tokenizer = load_vllm_model_and_tokenizer(
+                base_model_name=base_model_name,
+                gpu_memory_utilization=vllm_gpu_memory_utilization,
+                max_lora_rank=vllm_max_lora_rank,
+                max_model_len=vllm_max_model_len,
+                max_num_seqs=vllm_max_num_seqs,
+                enforce_eager=vllm_enforce_eager,
+            )
+            try:
+                for model_name in grouped_missing:
+                    prompt_names_to_run = missing_by_model.get(model_name, [])
+                    model_runtime = runtime_specs[model_name]
+                    adapter_path = model_runtime["adapter_path"]
+                    lora_request = build_lora_request(model_name, adapter_path, lora_int_id)
+                    lora_int_id += 1
+                    for prompt_name in prompt_names_to_run:
+                        plan = pending[(model_name, prompt_name)]
+                        missing_records = plan["missing_records"]
+                        logger.info(
+                            "Generating %s/%s/%s with vLLM base=%s for missing rows: %s/%s",
+                            prefix,
+                            model_name,
+                            prompt_name,
+                            model_runtime["base_role"],
+                            len(missing_records),
+                            len(records),
                         )
+                        checkpoint_path = detail_file(output_dir, prefix, model_name, prompt_name)
 
-                    generated = generate_prompt_details(
-                        records=missing_records,
-                        model=llm,
-                        tokenizer=tokenizer,
-                        model_name=model_name,
-                        prompt_name=prompt_name,
-                        batch_size=batch_size,
-                        max_new_tokens=max_new_tokens,
-                        temperature=temperature,
-                        do_sample=do_sample,
-                        engine="vllm",
-                        lora_request=lora_request,
-                        checkpoint_callback=checkpoint,
-                    )
-                    merged_file_details = merge_detail_records(
-                        plan["existing_details"],
-                        generated,
-                        model_name,
-                        prompt_name,
-                    )
-                    details = order_details_for_records(records, merged_file_details)
-                    if len(details) != len(records):
-                        raise RuntimeError(f"Resume merge failed for {(model_name, prompt_name)}")
-                    details_by_combo[(model_name, prompt_name)] = details
-                    write_json(detail_file(output_dir, prefix, model_name, prompt_name), merged_file_details)
-                    write_csv(csv_file(output_dir, prefix, model_name, prompt_name), details_to_rows(records, details))
-        finally:
-            cleanup_model(llm)
+                        def checkpoint(
+                            generated_so_far: list[dict[str, Any]],
+                            plan=plan,
+                            model_name=model_name,
+                            prompt_name=prompt_name,
+                        ) -> None:
+                            write_json(
+                                checkpoint_path,
+                                merge_detail_records(plan["existing_details"], generated_so_far, model_name, prompt_name),
+                            )
+
+                        generated = generate_prompt_details(
+                            records=missing_records,
+                            model=llm,
+                            tokenizer=tokenizer,
+                            model_name=model_name,
+                            prompt_name=prompt_name,
+                            batch_size=batch_size,
+                            max_new_tokens=max_new_tokens,
+                            temperature=temperature,
+                            do_sample=do_sample,
+                            engine="vllm",
+                            lora_request=lora_request,
+                            checkpoint_callback=checkpoint,
+                            show_progress=vllm_show_progress,
+                            model_base_name=model_runtime["base_model_name"],
+                            model_base_role=model_runtime["base_role"],
+                        )
+                        merged_file_details = merge_detail_records(
+                            plan["existing_details"],
+                            generated,
+                            model_name,
+                            prompt_name,
+                        )
+                        details = order_details_for_records(records, merged_file_details)
+                        if len(details) != len(records):
+                            raise RuntimeError(f"Resume merge failed for {(model_name, prompt_name)}")
+                        details_by_combo[(model_name, prompt_name)] = details
+                        write_json(detail_file(output_dir, prefix, model_name, prompt_name), merged_file_details)
+                        write_csv(csv_file(output_dir, prefix, model_name, prompt_name), details_to_rows(records, details))
+            finally:
+                cleanup_model(llm)
         return details_by_combo
 
     from src.models.model_loader import load_peft_model
 
     for model_name, prompt_names_to_run in missing_by_model.items():
-        spec = MODEL_SPECS[model_name]
-        adapter_path = ensure_checkpoint(spec)
-        logger.info("Loading %s from %s", model_name, adapter_path)
+        model_runtime = runtime_specs[model_name]
+        adapter_path = model_runtime["adapter_path"]
+        logger.info(
+            "Loading %s adapter=%s base=%s",
+            model_name,
+            adapter_path,
+            model_runtime["base_model_name"],
+        )
         model, tokenizer = load_peft_model(
-            base_model_name=base_model_name,
+            base_model_name=model_runtime["base_model_name"],
             adapter_path=adapter_path,
             torch_dtype="bfloat16",
         )
@@ -696,6 +856,8 @@ def prepare_dataset_details(
                     do_sample=do_sample,
                     engine="hf",
                     checkpoint_callback=checkpoint,
+                    model_base_name=model_runtime["base_model_name"],
+                    model_base_role=model_runtime["base_role"],
                 )
                 merged_file_details = merge_detail_records(
                     plan["existing_details"],
@@ -912,6 +1074,7 @@ def build_report(
     test_details: dict[tuple[str, str], list[dict[str, Any]]] | None,
     model_names: list[str],
     prompt_names: list[str],
+    runtime_specs: dict[str, dict[str, str]],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     val_metrics: dict[str, dict[str, Any]] = {}
@@ -966,7 +1129,7 @@ def build_report(
     return {
         "scope": "inference_stage_prompt_ablation",
         "controlled_variable": "prompt_shape",
-        "models": {model_name: MODEL_SPECS[model_name] for model_name in model_names},
+        "models": {model_name: runtime_specs[model_name] for model_name in model_names},
         "prompts": prompt_names,
         "inputs": {
             "val": args.val,
@@ -981,6 +1144,11 @@ def build_report(
             "reuse_existing": not args.no_reuse_existing,
             "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization,
             "vllm_max_lora_rank": args.vllm_max_lora_rank,
+            "vllm_max_model_len": args.vllm_max_model_len,
+            "vllm_max_num_seqs": args.vllm_max_num_seqs,
+            "vllm_enforce_eager": args.vllm_enforce_eager,
+            "vllm_show_progress": args.vllm_show_progress,
+            "sft_merged_dir": args.sft_merged_dir,
         },
         "validation": {
             "rows": len(val_records),
@@ -1001,6 +1169,7 @@ def write_summary_markdown(path: str | Path, report: dict[str, Any]) -> None:
         "# Few-shot CoT Prompt Ablation",
         "",
         "This experiment keeps the adapter checkpoint fixed and changes only the inference prompt.",
+        "DPO/GRPO adapters are evaluated on the SFT-merged base used during their second-stage training.",
         "Validation accuracy is the primary evidence. Test output has no gold labels, so test artifacts are for submission and disagreement inspection only.",
         "",
         "## Validation Accuracy",
@@ -1065,6 +1234,11 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
     base_model_name = args.base_model or load_base_model_name()
     reuse_existing = not args.no_reuse_existing
     generate_missing = not args.only_reuse_existing
+    runtime_specs = resolve_model_runtime_specs(
+        model_names=model_names,
+        raw_base_model_name=base_model_name,
+        sft_merged_dir=args.sft_merged_dir,
+    )
 
     val_details = prepare_dataset_details(
         records=val_records,
@@ -1072,7 +1246,7 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
         prefix="val",
         model_names=model_names,
         prompt_names=prompt_names,
-        base_model_name=base_model_name,
+        runtime_specs=runtime_specs,
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
@@ -1082,6 +1256,10 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
         engine=args.engine,
         vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
         vllm_max_lora_rank=args.vllm_max_lora_rank,
+        vllm_max_model_len=args.vllm_max_model_len,
+        vllm_max_num_seqs=args.vllm_max_num_seqs,
+        vllm_enforce_eager=args.vllm_enforce_eager,
+        vllm_show_progress=args.vllm_show_progress,
     )
 
     test_details = None
@@ -1092,7 +1270,7 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
             prefix="test",
             model_names=model_names,
             prompt_names=prompt_names,
-            base_model_name=base_model_name,
+            runtime_specs=runtime_specs,
             batch_size=args.batch_size,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
@@ -1102,6 +1280,10 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
             engine=args.engine,
             vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
             vllm_max_lora_rank=args.vllm_max_lora_rank,
+            vllm_max_model_len=args.vllm_max_model_len,
+            vllm_max_num_seqs=args.vllm_max_num_seqs,
+            vllm_enforce_eager=args.vllm_enforce_eager,
+            vllm_show_progress=args.vllm_show_progress,
         )
 
     val_disagreements: list[dict[str, Any]] = []
@@ -1137,6 +1319,7 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
         test_details=test_details,
         model_names=model_names,
         prompt_names=prompt_names,
+        runtime_specs=runtime_specs,
         args=args,
     )
     report["validation"]["disagreement_count"] = len(val_disagreements)
@@ -1151,7 +1334,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Few-shot CoT prompt ablation for SFT/DPO/GRPO adapters")
     parser.add_argument("--val", default="data/splits/train_expr_clean_val.json")
     parser.add_argument("--test", default="data/raw/test.json")
-    parser.add_argument("--output_dir", default="outputs/evaluation/cot_prompt_ablation")
+    parser.add_argument("--output_dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--models", default="sft_cot,dpo,grpo")
     parser.add_argument("--prompts", default="direct,zero_shot_cot,few_shot_cot")
     parser.add_argument("--base_model", default="")
@@ -1162,6 +1345,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine", choices=ENGINE_NAMES, default="vllm")
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--vllm_max_lora_rank", type=int, default=16)
+    parser.add_argument("--vllm_max_model_len", type=int, default=2048)
+    parser.add_argument("--vllm_max_num_seqs", type=int, default=64)
+    parser.add_argument("--vllm_enforce_eager", action="store_true")
+    parser.add_argument("--vllm_show_progress", action="store_true")
+    parser.add_argument("--sft_merged_dir", default=DEFAULT_SFT_MERGED_DIR)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--no_reuse_existing", action="store_true")
