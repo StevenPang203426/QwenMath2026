@@ -349,10 +349,10 @@ token 主要来自大模型回退增强，应作为可选流程：
 
 建议新增脚本：
 
-- `scripts/run_quality_audit.sh`
-- `scripts/run_format_repair.sh`
-- `scripts/run_data_augment.sh`
-- `scripts/run_clean_data_merge.sh`
+- `scripts/data.sh quality-audit`
+- `scripts/data.sh format-repair`
+- `scripts/data.sh augment`
+- `scripts/data.sh clean-merge`
 
 ---
 

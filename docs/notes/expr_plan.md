@@ -37,7 +37,7 @@
 
 ## 2. 数据构造
 
-表达式路线的数据构造应接入数据质量审计与增强流程，详见 `docs/data_quality_augmentation_plan.md`。核心顺序是：先审计和高门槛自动修复，再只对高可信且表达式可验证的题做规则优先增强。
+表达式路线的数据构造应接入数据质量审计与增强流程，详见 `docs/notes/data_quality_augmentation_plan.md`。核心顺序是：先审计和高门槛自动修复，再只对高可信且表达式可验证的题做规则优先增强。
 
 ### 2.1 DeepSeek API 生成表达式
 
@@ -205,7 +205,7 @@ user: 食堂运来105千克的萝卜，运来的青菜是萝卜的3倍，运来�
 assistant: <expr>105*3</expr><answer>315</answer>
 ```
 
-**配置（configs/sft_expr_clean.yaml）：**
+**配置（configs/expr/sft_expr_clean.yaml）：**
 
 ```yaml
 inherit: base
@@ -241,7 +241,7 @@ training:
 - R2/R4 约束规范表达式，避免函数、比较、变量、LaTeX 等取巧写法
 - R5/R6 是防守项，约束 answer 标签自洽并减少标签外解释
 
-**配置（configs/grpo_expr_clean.yaml）：**
+**配置（configs/expr/grpo_expr_clean.yaml）：**
 
 ```yaml
 inherit: base
@@ -378,12 +378,12 @@ def final_vote(cot_grpo_ans, cot_sft_ans, expr_grpo_ans, expr_sft_ans, question)
 | `src/training/sft_expr_trainer.py` | 表达式 SFT 训练（或复用现有 sft_trainer） |
 | `src/training/grpo_expr_trainer.py` | 表达式 GRPO 训练（使用表达式专用奖励） |
 | `src/inference/expr_predictor.py` | 表达式推理 + safe_eval |
-| `configs/sft_expr.yaml` | 表达式 SFT 配置 |
-| `configs/grpo_expr.yaml` | 表达式 GRPO 配置 |
-| `scripts/run_expr_data_build.sh` | 表达式数据构建脚本 |
-| `scripts/run_sft_expr.sh` | 表达式 SFT 训练脚本 |
-| `scripts/run_grpo_expr.sh` | 表达式 GRPO 训练脚本 |
-| `scripts/run_infer_vote.sh` | 4 模型投票推理脚本 |
+| `configs/expr/sft_expr.yaml` | 表达式 SFT 配置 |
+| `configs/expr/grpo_expr.yaml` | 表达式 GRPO 配置 |
+| `scripts/data.sh expr-build` | 表达式数据构建脚本 |
+| `scripts/train.sh sft expr legacy` | 表达式 SFT 训练脚本 |
+| `scripts/train.sh grpo expr legacy` | 表达式 GRPO 训练脚本 |
+| `scripts/submit.sh vote` | 4 模型投票推理脚本 |
 
 ### 修改文件
 
@@ -399,11 +399,11 @@ def final_vote(cot_grpo_ans, cot_sft_ans, expr_grpo_ans, expr_sft_ans, question)
 ```
 第 1 步: expr_builder.py — 数据构造 + API 调用 + 验证
     ↓
-第 2 步: sft_expr_trainer.py + configs/sft_expr.yaml — SFT 训练
+第 2 步: sft_expr_trainer.py + configs/expr/sft_expr.yaml — SFT 训练
     ↓
 第 3 步: reward_expr.py — 表达式专用奖励函数
     ↓
-第 4 步: grpo_expr_trainer.py + configs/grpo_expr.yaml — GRPO 训练
+第 4 步: grpo_expr_trainer.py + configs/expr/grpo_expr.yaml — GRPO 训练
     ↓
 第 5 步: expr_predictor.py — 推理 + safe_eval + fallback
     ↓

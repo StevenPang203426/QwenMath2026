@@ -241,7 +241,7 @@ P2 的分类逻辑可以与 GRPO 训练时的格式标签奖励（R2）形成正
 
 | 修改文件 | 说明 |
 |---|---|
-| `configs/infer.yaml` | 新增 ensemble 配置节 |
+| `configs/inference/infer.yaml` | 新增 ensemble 配置节 |
 
 ---
 

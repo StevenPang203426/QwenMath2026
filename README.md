@@ -58,18 +58,17 @@ ls data/raw/train.json data/raw/test.json
 ### 运行实验
 
 ```bash
-# 跑单个方案
-bash scripts/run_baseline.sh        # Baseline
-bash scripts/run_data_build.sh      # 数据构建（需设置 DEEPSEEK_API_KEY）
-bash scripts/run_sft_cot.sh         # CoT SFT
-bash scripts/run_dpo.sh             # DPO
-bash scripts/run_grpo.sh            # GRPO
+# 统一入口（推荐）
+bash scripts/data.sh cot-build 20       # CoT 数据构建小批量，需要 DEEPSEEK_API_KEY
+bash scripts/train.sh sft cot           # CoT SFT
+bash scripts/train.sh dpo cot           # CoT DPO
+bash scripts/train.sh grpo cot legacy   # CoT GRPO
 
-# 推理
-bash scripts/run_infer.sh sft_cot   # 可选: baseline | cot_prompt | sft_cot | dpo | grpo
+# 推理 / 提交
+bash scripts/submit.sh infer sft_cot    # 可选: baseline | cot_prompt | sft_cot | dpo | grpo
+bash scripts/submit.sh expr4            # 当前表达式投票提交入口
 
-# 全流程
-bash scripts/run_all_experiments.sh
+# 旧 run_*.sh 仍是兼容 wrapper，新实验优先使用上面的统一入口。
 ```
 
 ### 数据构建
@@ -80,9 +79,9 @@ bash scripts/run_all_experiments.sh
 export DEEPSEEK_API_KEY=your_key
 
 # 小批量测试（默认 20 条，验证 API 调用和答案匹配率）
-bash scripts/run_data_build.sh          # 20 条
-bash scripts/run_data_build.sh 50       # 50 条
-bash scripts/run_data_build.sh all      # 全量 12000 条
+bash scripts/data.sh cot-build          # 20 条
+bash scripts/data.sh cot-build 50       # 50 条
+bash scripts/data.sh cot-build all      # 全量 12000 条
 
 # 等价的 python 命令（更多参数控制）
 python -m src.data.data_builder \
@@ -139,16 +138,16 @@ python -m src.data.data_builder \
 ```bash
 # 1. 题目级质量审计与自动修复，需要 DEEPSEEK_API_KEY
 export DEEPSEEK_API_KEY=your_key
-bash scripts/run_quality_audit.sh all
+bash scripts/data.sh quality-audit all
 
 # 2. 表达式答案格式修复，不调用 API
-bash scripts/run_format_repair.sh
+bash scripts/data.sh format-repair
 
 # 3. 规则增强 + 增强数据对应性审计
-bash scripts/run_data_augment.sh
+bash scripts/data.sh augment
 
 # 4. 合并 raw_ok、auto_repair、expr_format_repair、clean rule_augment
-bash scripts/run_clean_data_merge.sh
+bash scripts/data.sh clean-merge
 ```
 
 主要产物：
@@ -184,21 +183,21 @@ bash scripts/run_clean_data_merge.sh
 
 ```bash
 # 1. 从 clean 合并数据中过滤安全表达式，并构建固定 train/val split 与 DPO pairs
-bash scripts/run_expr_training_data.sh all
+bash scripts/data.sh expr-training all
 
 # 2. 主线：Expr-SFT → Expr-GRPO
-bash scripts/run_sft_expr_clean.sh
-bash scripts/run_grpo_expr_clean.sh
+bash scripts/train.sh sft expr clean
+bash scripts/train.sh grpo expr clean
 
 # 3. 加速版 GRPO：优先尝试 vLLM，异常时回退 fast
-bash scripts/run_grpo_expr_clean_vllm.sh
-bash scripts/run_grpo_expr_clean_fast.sh
+bash scripts/train.sh grpo expr clean-vllm
+bash scripts/train.sh grpo expr clean-fast
 
 # 4. 消融：Expr-DPO → Expr-GRPO
-bash scripts/run_dpo_expr_clean.sh
-bash scripts/run_grpo_expr_from_dpo_clean.sh
-bash scripts/run_grpo_expr_from_dpo_clean_vllm.sh
-bash scripts/run_grpo_expr_from_dpo_clean_fast.sh
+bash scripts/train.sh dpo expr clean
+bash scripts/train.sh grpo expr from-dpo-clean
+bash scripts/train.sh grpo expr from-dpo-clean-vllm
+bash scripts/train.sh grpo expr from-dpo-clean-fast
 ```
 
 `grpo_expr_clean_vllm` 和 `grpo_expr_from_dpo_clean_vllm` 使用 vLLM rollout 加速；当前环境 `vLLM=0.21.0` 超出 TRL 声明的 `0.12.0~0.18.0` 支持范围，但已通过本机 1-step smoke。若需强制版本检查，可设置 `STRICT_VLLM_VERSION=1`。`*_fast` 不使用 vLLM，主要通过 `max_completion_length=96`、关闭训练中 eval、降低保存频率、调整 microbatch 来加速。
@@ -214,17 +213,17 @@ bash scripts/run_grpo_expr_from_dpo_clean_fast.sh
 
 ### 配置管理
 
-所有超参通过 `configs/*.yaml` 管理，支持继承和命令行覆盖：
+所有超参通过 `configs/` 分路线管理，支持继承和命令行覆盖：
 
 ```bash
 # 命令行覆盖示例
-python -m src.training.sft_trainer --config configs/sft_cot.yaml --training.learning_rate 1e-5
+python -m src.training.sft_trainer --config configs/cot/sft_cot.yaml --training.learning_rate 1e-5
 ```
 
 ## 项目结构
 
 ```
-├── configs/          # YAML 配置文件
+├── configs/          # YAML 配置文件（cot/expr/inference/experiments）
 ├── data/             # 数据（raw/processed/splits）
 ├── src/              # 核心代码
 │   ├── data/         # 数据处理、答案提取、API 数据构建
@@ -232,7 +231,7 @@ python -m src.training.sft_trainer --config configs/sft_cot.yaml --training.lear
 │   ├── training/     # SFT / DPO / GRPO 训练器
 │   ├── inference/    # 推理、CoT 提示、批量推理
 │   └── utils/        # 配置、指标、日志、种子
-├── scripts/          # Shell 运行脚本
+├── scripts/          # 统一入口 + 兼容 wrapper
 ├── notebooks/        # 实验分析
 ├── outputs/          # checkpoint、提交文件、日志
 └── report/           # 课程报告

@@ -46,7 +46,7 @@
 
 ### 3.1 GRPO 五维奖励函数重新设计
 
-**文件：** `src/models/reward.py`，`src/training/grpo_trainer.py`，`configs/grpo.yaml`
+**文件：** `src/models/reward.py`，`src/training/grpo_trainer.py`，`configs/cot/grpo.yaml`
 
 参考 DeepSeek-R1、GRPO-LEAD（EMNLP 2025）设计 5 个独立奖励函数：
 
@@ -83,11 +83,16 @@ Smoke 结果已完成：`balanced:direct` 达到 0.7358（844/1147，missing tag
 
 Balanced full 结果没有保持 smoke 收益：最佳为 `zero_shot_cot = 0.7010`（804/1147，missing tag 49），`direct = 0.6922` 且 missing tag 165，`few_shot_cot = 0.6888`。因此 full checkpoint 未达到 `sft_cot:direct = 0.7376` 的替换门槛，当前主模型仍固定为 `sft_cot:direct`。下一轮 GRPO 不应直接跑完整 1 epoch，应采用 capped/staged full（例如 max_steps checkpoint sweep）来避免过训练和格式退化。
 
-新增入口：`scripts/run_cot_offline_ensemble.sh`、`scripts/run_grpo_cot_reward_smoke.sh`、`scripts/run_dpo_audit.sh`、`scripts/run_grpo_cot_reward_full.sh`。全量训练配置为 `configs/grpo_cot_reward_balanced_full.yaml`，输出到 `outputs/checkpoints/grpo_cot_reward_balanced_full`，不会覆盖旧 GRPO checkpoint。
+新增统一入口：`scripts/evaluate.sh cot-ensemble`、`scripts/train.sh grpo cot smoke`、`scripts/evaluate.sh dpo-audit`、`scripts/train.sh grpo cot full`。旧 run_*.sh 兼容入口已删除。全量训练配置为 `configs/experiments/grpo_cot_reward_balanced_full.yaml`，输出到 `outputs/checkpoints/grpo_cot_reward_balanced_full`，不会覆盖旧 GRPO checkpoint。
+
+
+### 3.2.2 结构整理入口（2026-06-11）
+
+项目脚本与配置已按路线分层：新命令优先使用 `scripts/train.sh`、`scripts/evaluate.sh`、`scripts/data.sh`、`scripts/submit.sh`；旧 run_*.sh 兼容入口已删除。配置按 `configs/cot/`、`configs/expr/`、`configs/inference/`、`configs/experiments/` 分类；根目录旧配置 shim 已删除。文档按 `docs/notes/`、`docs/runbooks/`、`docs/issues/`、`docs/assets/`、`docs/reference/` 分类；生成结果只在 `outputs/evaluation/INDEX.md` 保留索引。
 
 ### 3.3 GRPO 训练加速
 
-**文件：** `configs/grpo.yaml`，`src/training/grpo_trainer.py`
+**文件：** `configs/cot/grpo.yaml`，`src/training/grpo_trainer.py`
 
 | 变更 | 原值 → 新值 | 效果 |
 |------|-------------|------|
@@ -137,7 +142,7 @@ Balanced full 结果没有保持 smoke 收益：最佳为 `zero_shot_cot = 0.701
 
 ### 3.7 表达式方案（完整新路线）
 
-**设计文档：** `docs/expr_plan.md`
+**设计文档：** `docs/notes/expr_plan.md`
 
 #### 3.6.1 数据构造
 
@@ -169,13 +174,13 @@ Balanced full 结果没有保持 smoke 收益：最佳为 `zero_shot_cot = 0.701
 
 #### 3.6.4 表达式 GRPO 训练器
 
-**文件：** `src/training/grpo_expr_trainer.py`，`configs/grpo_expr.yaml`
+**文件：** `src/training/grpo_expr_trainer.py`，`configs/expr/grpo_expr.yaml`
 
 `max_new_tokens=128`（表达式远短于 CoT），训练速度比 CoT 路线快 2-3 倍。
 
 ### 3.7 4 模型投票融合
 
-**文件：** `scripts/run_infer_vote.sh`
+**文件：** `scripts/submit.sh vote`（旧投票 wrapper 已删除）
 
 | 模型 | 路线 | 权重 |
 |------|------|------|
@@ -188,7 +193,7 @@ Balanced full 结果没有保持 smoke 收益：最佳为 `zero_shot_cot = 0.701
 
 ### 3.8 数据质量审计与修复
 
-**文件：** `src/data/quality_auditor.py`，`docs/data_quality_augmentation_plan.md`
+**文件：** `src/data/quality_auditor.py`，`docs/notes/data_quality_augmentation_plan.md`
 
 流程：expr_builder 3 次重算仍失败的记录 → 自动导出到 `quality_candidates.json` → quality_auditor 预筛 + 大模型审计 → 高门槛修复（safe_eval 验证 repair_expression）。
 
@@ -218,24 +223,24 @@ Balanced full 结果没有保持 smoke 收益：最佳为 `zero_shot_cot = 0.701
 | `src/inference/ensemble_infer.py` | 新建 | 多路推理投票融合 |
 | `src/inference/expr_predictor.py` | 新建 | 表达式推理 + safe_eval + fallback |
 | `src/training/grpo_expr_trainer.py` | 新建 | 表达式 GRPO 训练器 |
-| `configs/grpo_expr.yaml` | 新建 | 表达式 GRPO 配置 |
-| `configs/sft_expr.yaml` | 新建 | 表达式 SFT 配置 |
+| `configs/expr/grpo_expr.yaml` | 新建 | 表达式 GRPO 配置 |
+| `configs/expr/sft_expr.yaml` | 新建 | 表达式 SFT 配置 |
 | `tests/test_postprocessor.py` | 新建 | 后处理单元测试 |
-| `docs/optimization_plan.md` | 新建 | 优化方案文档（借鉴 Math2） |
-| `docs/expr_plan.md` | 新建 | 表达式方案设计文档 |
+| `docs/notes/optimization_plan.md` | 新建 | 优化方案文档（借鉴 Math2） |
+| `docs/notes/expr_plan.md` | 新建 | 表达式方案设计文档 |
 
 ### 新建脚本
 
 | 脚本 | 命令 |
 |------|------|
-| `scripts/run_expr_data_build.sh` | `bash scripts/run_expr_data_build.sh correct <api_key>` |
-| `scripts/run_sft_expr.sh` | `bash scripts/run_sft_expr.sh` |
-| `scripts/run_grpo_expr.sh` | `bash scripts/run_grpo_expr.sh` |
-| `scripts/run_infer_vote.sh` | `bash scripts/run_infer_vote.sh` |
-| `scripts/run_infer_ensemble.sh` | `bash scripts/run_infer_ensemble.sh` |
-| `scripts/run_classify_questions.sh` | `bash scripts/run_classify_questions.sh data/raw/test.json` |
-| `scripts/run_postprocess_csv.sh` | `bash scripts/run_postprocess_csv.sh <input.csv>` |
-| `scripts/run_test_postprocessor.sh` | `bash scripts/run_test_postprocessor.sh` |
+| `scripts/data.sh expr-build` | `bash scripts/data.sh expr-build correct <api_key>` |
+| `scripts/train.sh sft expr legacy` | `bash scripts/train.sh sft expr legacy` |
+| `scripts/train.sh grpo expr legacy` | `bash scripts/train.sh grpo expr legacy` |
+| `scripts/submit.sh vote` | `bash scripts/submit.sh vote` |
+| `scripts/submit.sh ensemble` | `bash scripts/submit.sh ensemble` |
+| `scripts/evaluate.sh classify` | `bash scripts/evaluate.sh classify data/raw/test.json` |
+| `scripts/evaluate.sh postprocess` | `bash scripts/evaluate.sh postprocess <input.csv>` |
+| `scripts/evaluate.sh postprocessor-tests` | `bash scripts/evaluate.sh postprocessor-tests` |
 
 ### 修改文件
 
@@ -244,7 +249,7 @@ Balanced full 结果没有保持 smoke 收益：最佳为 `zero_shot_cot = 0.701
 | `src/training/grpo_trainer.py` | 集成新奖励函数 + vLLM + 加速参数 |
 | `src/inference/batch_infer.py` | 集成后处理器 + 分类器 + 去表头 |
 | `src/models/__init__.py` | 更新导入（移除已删除的旧函数） |
-| `configs/grpo.yaml` | 训练加速参数 + 5 维奖励注释 |
+| `configs/cot/grpo.yaml` | 训练加速参数 + 5 维奖励注释 |
 
 ---
 
@@ -253,35 +258,35 @@ Balanced full 结果没有保持 smoke 收益：最佳为 `zero_shot_cot = 0.701
 ### CoT 路线（现有，已部分完成）
 
 ```
-1. bash scripts/run_data_build.sh           # CoT 数据构建
-2. bash scripts/run_sft_cot.sh              # CoT SFT 训练
-3. bash scripts/run_dpo.sh                  # CoT DPO 训练
-4. bash scripts/run_grpo.sh                 # CoT GRPO 训练
+1. bash scripts/data.sh cot-build all           # CoT 数据构建
+2. bash scripts/train.sh sft cot              # CoT SFT 训练
+3. bash scripts/train.sh dpo cot                  # CoT DPO 训练
+4. bash scripts/train.sh grpo cot legacy                 # CoT GRPO 训练
 ```
 
 ### 表达式路线（新增）
 
 ```
-5. bash scripts/run_expr_data_build.sh correct <api_key> 50   # 小批量测试
-6. bash scripts/run_expr_data_build.sh correct <api_key>       # 全量正确表达式
-7. bash scripts/run_expr_data_build.sh wrong <api_key>         # 错误表达式
-8. bash scripts/run_expr_data_build.sh convert_sft             # 转换 SFT 格式
-9. bash scripts/run_sft_expr.sh                                # 表达式 SFT
-10. bash scripts/run_grpo_expr.sh                              # 表达式 GRPO
+5. bash scripts/data.sh expr-build correct <api_key> 50   # 小批量测试
+6. bash scripts/data.sh expr-build correct <api_key>       # 全量正确表达式
+7. bash scripts/data.sh expr-build wrong <api_key>         # 错误表达式
+8. bash scripts/data.sh expr-build convert_sft             # 转换 SFT 格式
+9. bash scripts/train.sh sft expr legacy                                # 表达式 SFT
+10. bash scripts/train.sh grpo expr legacy                              # 表达式 GRPO
 ```
 
 ### 推理 + 提交
 
 ```
-11. bash scripts/run_infer_vote.sh          # 4 模型投票推理 → submit_voted.csv
+11. bash scripts/submit.sh vote          # 4 模型投票推理 → submit_voted.csv
 ```
 
 ### 辅助工具
 
 ```
-bash scripts/run_classify_questions.sh data/raw/test.json   # 查看题目类型分布
-bash scripts/run_postprocess_csv.sh <旧csv>                  # 对旧结果做后处理
-bash scripts/run_test_postprocessor.sh                       # 后处理单元测试
+bash scripts/evaluate.sh classify data/raw/test.json   # 查看题目类型分布
+bash scripts/evaluate.sh postprocess <旧csv>                  # 对旧结果做后处理
+bash scripts/evaluate.sh postprocessor-tests                       # 后处理单元测试
 ```
 
 ---

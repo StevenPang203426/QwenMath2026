@@ -255,7 +255,7 @@ answer_extraction:
     - '(\d+\.?\d*)\s*$'               # 最后一个数字
 ```
 
-**`configs/sft_cot.yaml`** — CoT SFT 特定配置（继承 base）：
+**`configs/cot/sft_cot.yaml`** — CoT SFT 特定配置（继承 base）：
 ```yaml
 inherit: base
 
@@ -277,7 +277,7 @@ training:
   eval_steps: 500
 ```
 
-**`configs/dpo.yaml`**：
+**`configs/cot/dpo.yaml`**：
 ```yaml
 inherit: base
 
@@ -299,7 +299,7 @@ training:
   learning_rate: 5e-5
 ```
 
-**`configs/grpo.yaml`**：
+**`configs/cot/grpo.yaml`**：
 ```yaml
 inherit: base
 

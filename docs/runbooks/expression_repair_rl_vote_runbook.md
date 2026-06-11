@@ -7,7 +7,7 @@
 当前已执行无外部 API 的安全合并：
 
 ```bash
-bash scripts/run_expr_repair.sh no_api
+bash scripts/data.sh expr-repair no_api
 ```
 
 产物：
@@ -23,19 +23,19 @@ bash scripts/run_expr_repair.sh no_api
 
 ```bash
 export DEEPSEEK_API_KEY=your_key
-bash scripts/run_expr_repair.sh
+bash scripts/data.sh expr-repair
 ```
 
 脚本默认每 100 条写一次 checkpoint，可通过环境变量调整：
 
 ```bash
-CHECKPOINT_EVERY=50 bash scripts/run_expr_repair.sh
+CHECKPOINT_EVERY=50 bash scripts/data.sh expr-repair
 ```
 
 如果本机 `no_proxy` 环境变量含有异常字符，OpenAI/httpx 初始化可能报 `Invalid port`。本次运行通过覆盖干净代理例外列表解决：
 
 ```bash
-env no_proxy='localhost,127.0.0.1,::1' NO_PROXY='localhost,127.0.0.1,::1' bash scripts/run_expr_repair.sh
+env no_proxy='localhost,127.0.0.1,::1' NO_PROXY='localhost,127.0.0.1,::1' bash scripts/data.sh expr-repair
 ```
 
 本次真实 API 修复结果：原安全样本 10702 条，API 修复成功 245 条，最终安全样本 10947 条，剩余 rejected 1052 条；安全样本复验 0 违规。报告记录 API 请求 3420 次，prompt cache hit tokens 801664，miss tokens 333258。
@@ -53,7 +53,7 @@ env no_proxy='localhost,127.0.0.1,::1' NO_PROXY='localhost,127.0.0.1,::1' bash s
 已执行：
 
 ```bash
-bash scripts/run_clean_data_merge.sh
+bash scripts/data.sh clean-merge
 ```
 
 最终产物：
@@ -78,7 +78,7 @@ bash scripts/run_clean_data_merge.sh
 已执行：
 
 ```bash
-bash scripts/run_expr_training_data.sh all
+bash scripts/data.sh expr-training all
 ```
 
 当前表达式 clean 数据来自 `data/processed/train_clean_augmented.json`，只保留通过规范表达式检测、可 eval，且题意归一后与标注答案一致的样本。
@@ -104,26 +104,26 @@ clean 表达式全集来源分布：
 ## 表达式实验矩阵
 
 ```bash
-bash scripts/run_sft_expr_clean.sh
-bash scripts/run_grpo_expr_clean.sh
-bash scripts/run_grpo_expr_clean_vllm.sh
-bash scripts/run_grpo_expr_clean_fast.sh
-bash scripts/run_dpo_expr_clean.sh
-bash scripts/run_grpo_expr_from_dpo_clean.sh
-bash scripts/run_grpo_expr_from_dpo_clean_vllm.sh
-bash scripts/run_grpo_expr_from_dpo_clean_fast.sh
+bash scripts/train.sh sft expr clean
+bash scripts/train.sh grpo expr clean
+bash scripts/train.sh grpo expr clean-vllm
+bash scripts/train.sh grpo expr clean-fast
+bash scripts/train.sh dpo expr clean
+bash scripts/train.sh grpo expr from-dpo-clean
+bash scripts/train.sh grpo expr from-dpo-clean-vllm
+bash scripts/train.sh grpo expr from-dpo-clean-fast
 ```
 
 | 实验 | 初始化 | 配置 | 说明 |
 |------|------|------|------|
-| `sft_expr_clean` | base model | `configs/sft_expr_clean.yaml` | 表达式 SFT 主线 |
-| `grpo_expr_clean` | `sft_expr_clean/best` | `configs/grpo_expr_clean.yaml` | GRPO 主线 |
-| `grpo_expr_clean_vllm` | `sft_expr_clean/best` | `configs/grpo_expr_clean_vllm.yaml` | vLLM rollout 加速 |
-| `grpo_expr_clean_fast` | `sft_expr_clean/best` | `configs/grpo_expr_clean_fast.yaml` | 不依赖 vLLM 的保守加速 |
-| `dpo_expr_clean` | `sft_expr_clean/best` | `configs/dpo_expr_clean.yaml` | DPO 消融 |
-| `grpo_expr_from_dpo_clean` | `dpo_expr_clean/best` | `configs/grpo_expr_from_dpo_clean.yaml` | DPO→GRPO 消融 |
-| `grpo_expr_from_dpo_clean_vllm` | `dpo_expr_clean/best` | `configs/grpo_expr_from_dpo_clean_vllm.yaml` | DPO→GRPO vLLM 加速 |
-| `grpo_expr_from_dpo_clean_fast` | `dpo_expr_clean/best` | `configs/grpo_expr_from_dpo_clean_fast.yaml` | DPO→GRPO 保守加速 |
+| `sft_expr_clean` | base model | `configs/expr/sft_expr_clean.yaml` | 表达式 SFT 主线 |
+| `grpo_expr_clean` | `sft_expr_clean/best` | `configs/expr/grpo_expr_clean.yaml` | GRPO 主线 |
+| `grpo_expr_clean_vllm` | `sft_expr_clean/best` | `configs/expr/grpo_expr_clean_vllm.yaml` | vLLM rollout 加速 |
+| `grpo_expr_clean_fast` | `sft_expr_clean/best` | `configs/expr/grpo_expr_clean_fast.yaml` | 不依赖 vLLM 的保守加速 |
+| `dpo_expr_clean` | `sft_expr_clean/best` | `configs/expr/dpo_expr_clean.yaml` | DPO 消融 |
+| `grpo_expr_from_dpo_clean` | `dpo_expr_clean/best` | `configs/expr/grpo_expr_from_dpo_clean.yaml` | DPO→GRPO 消融 |
+| `grpo_expr_from_dpo_clean_vllm` | `dpo_expr_clean/best` | `configs/expr/grpo_expr_from_dpo_clean_vllm.yaml` | DPO→GRPO vLLM 加速 |
+| `grpo_expr_from_dpo_clean_fast` | `dpo_expr_clean/best` | `configs/expr/grpo_expr_from_dpo_clean_fast.yaml` | DPO→GRPO 保守加速 |
 
 GRPO clean 原始配置默认 `use_vllm: false`。当前环境的 TRL 声明支持 vLLM 0.12-0.18，本机 vLLM 是 0.21.0；`*_vllm.sh` 会给出警告但允许运行，因为已通过本机 1-step smoke。若需强制版本检查，可设置 `STRICT_VLLM_VERSION=1`。`*_fast` 不使用 vLLM，保留同样的 `num_generations=8`，将 `max_completion_length` 收紧到 96、`max_prompt_length` 收紧到覆盖全训练集的 192，关闭训练中 eval，并把保存间隔放宽到 500 step。
 
@@ -145,7 +145,7 @@ GRPO clean 原始配置默认 `use_vllm: false`。当前环境的 TRL 声明支�
 ## 表达式优先投票
 
 ```bash
-bash scripts/run_infer_vote.sh
+bash scripts/submit.sh vote
 ```
 
 表达式模型每题生成多个候选；安全表达式候选是主答案来源，CoT 答案只用于验证、破局或兜底。最终输出：

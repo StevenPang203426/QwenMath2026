@@ -1,0 +1,746 @@
+# 问题与解决方案记录
+
+> 项目：CCF BDCI 小学数学应用题自动解题
+> 更新日期：2026-06-11
+
+---
+
+## 1. 文件截断问题（data_builder.py）
+
+**现象：** data_builder.py 多次出现文件末尾被截断，语法错误。
+
+**原因：** 文件包含大量中文字符，通过编辑工具写入时在多字节 UTF-8 边界处截断。
+
+**解决：** 使用 bash heredoc 或 Python 脚本直接写入。每次写入后用 ast.parse 验证语法。
+
+---
+
+## 2. Baseline 推理找不到 checkpoint
+
+**现象：** run_baseline.sh 推理报错 adapter_config.json not found at best。
+
+**原因：** Trainer 保存为 checkpoint-{step}，不会自动创建 best 目录。
+
+**解决：** batch_infer.py 新增 _resolve_checkpoint_path()，自动查找最新 checkpoint-* 目录。
+
+---
+
+## 3. AutoDL 模型下载超时
+
+**现象：** 模型加载卡住，无法下载 Qwen2.5-0.5B-Instruct。
+
+**原因：** AutoDL 网络代理拦截了下载请求。
+
+**解决：** 配置中改为绝对路径 /root/autodl-tmp/steven/Math/QwenMath2026/model_cache/Qwen/Qwen2.5-0.5B-Instruct。
+
+---
+
+## 4. DeepSeek API 代理冲突
+
+**现象：** 调用 API 超时，连接被拒绝。
+
+**原因：** AutoDL 的 http_proxy 环境变量拦截了 api.deepseek.com 请求。
+
+**解决：** 运行前 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY。
+
+---
+
+## 5. DeepSeek API 401 + 模型废弃
+
+**现象：** API 返回 401，deepseek-chat 模型即将废弃。
+
+**原因：** 原代码用 requests 手动拼 HTTP，认证格式不对。
+
+**解决：** 重写为 OpenAI SDK：from openai import OpenAI，base_url="https://api.deepseek.com"，模型改为 deepseek-v4-pro。
+
+---
+
+## 6. 正则无法匹配分数答案
+
+**现象：** API 返回"答案：3/5"，提取结果为"3"，丢失"/5"。
+
+**原因：** 正则 -?\d+\.?\d* 不支持分数。
+
+**解决：** 扩展为 -?\d+\.?\d*(?:/\d+\.?\d*)?%?，同步修改 data_builder.py、answer_extractor.py、metrics.py。
+
+---
+
+## 7. 分数与小数等价判断缺失
+
+**现象：** api_answer="3/5" 与 answer="0.6" 被判定为不匹配。
+
+**原因：** 字符串直接比较。
+
+**解决：** 新增 _normalize_answer() 统一转 float，_answers_match() 做容差比较（tol=1e-6）。
+
+---
+
+## 8. answer_match=False 无后续处理
+
+**需求：** 第一轮 API 答案不匹配或输出为空，需要自动重试。
+
+**解决：** 两轮处理机制。第一轮正常并行，第二轮对失败条目降低温度(0.1)重试。每条结果新增 status 字段（ok/api_failed/parse_error:xxx）。
+
+---
+
+## 9. 错误推理生成不自然
+
+**需求：** 原"故意犯错"prompt 生成的错误太明显。
+
+**解决：** 实现 SCDPO 风格错误推理生成：_split_cot_steps() 拆分正确推理为步骤，_generate_scdpo_wrong() 随机选中间步骤注入错误，保留前面正确步骤，拼接正确前半段+错误后半段。步骤太少时回退原始方式。
+
+---
+
+## 10. 百分数答案未完整提取
+
+**需求：** 10% 应完整提取，不是只取 10。
+
+**解决：** 正则末尾加 %?，_clean_answer() 百分数保留原样，_normalize_answer() 取 % 前数值。
+
+---
+
+## 11. 错误推理未过滤"算对了"的情况
+
+**现象：** `--generate_wrong` 生成的错误推理中，部分 wrong_answer 与正确答案完全相同。
+
+**原因：** 生成后没有调用 `_answers_match()` 校验，模型虽被要求犯错但仍可能给出正确答案。
+
+**解决：** 错误推理生成后增加 `_answers_match` 过滤，匹配（即答对了）则丢弃并重试，最多 3 次。引入 `wrong_status` 字段追踪来源（simple_try1/2/3, hard_fallback, scdpo, failed）。
+
+---
+
+## 12. 小批量测试污染生产数据
+
+**现象：** `--limit 10` 测试时输出写入 `train_cot_raw.json`，断点续传加载了旧数据导致测试不可靠。
+
+**原因：** 测试和生产共用同一输出路径和断点续传逻辑。
+
+**解决：** `limit > 0` 时自动切换输出到 `data/processed/test/test_{limit}.json`，关闭断点续传。保存频率动态调整：`save_every = min(100, max(10, len(todo) // 5))`。
+
+---
+
+## 13. 错误推理 prompt 太弱，成功率仅 10%
+
+**现象：** 纯角色扮演 prompt（"你是小明，三年级学生"）+ temperature=0.8，20 条中只有 2 条生成了错误答案。
+
+**原因：** 模型推理能力太强，角色扮演不足以让它犯错。
+
+**解决：** 采用两层 prompt 策略：
+1. `_PROMPT_WRONG`（主力）：明确要求"故意犯一个合理的计算错误"，约束"不要用'故意''错误地'等词"保持自然。
+2. `_PROMPT_WRONG_HARD`（兜底）：3 次都算对时启用，告知正确答案要求给出不同答案。
+
+成功率从 10% 提升到 60%+。
+
+---
+
+## 14. DeepSeek Thinking 模式导致温度参数失效
+
+**现象：** 设置 `temperature=0.8` 或 `1.3`，但输出多样性无明显变化。
+
+**原因：** DeepSeek V4 Flash 默认开启 thinking 模式，该模式下 `temperature` 和 `top_p` 被静默忽略。
+
+**解决：** 保留 thinking 模式（对推理质量有益），接受温度不可控的现实。如需禁用可加 `extra_body={"thinking": {"type": "disabled"}}`。
+
+**参考：** https://api-docs.deepseek.com/zh-cn/
+
+---
+
+## 15. Thinking 模式要求内容块格式
+
+**现象：** API 返回 400：`expected struct ChatCompletionRequestContentBlock`。
+
+**原因：** Thinking 模式开启时，DeepSeek 要求 `messages[].content` 为内容块格式 `[{"type": "text", "text": "..."}]`，不能是纯字符串。
+
+**解决：** 将 user message 改为内容块格式：
+```python
+{"role": "user", "content": [{"type": "text", "text": question}]}
+```
+同时将 `max_tokens` 从 1024 提升到 8192 以适配 thinking 模式更长的输出。
+
+---
+
+## 16. Question 字段类型不一致（str vs list）
+
+**现象：** `_sanitize_question()` 报错 `AttributeError: 'list' object has no attribute 'replace'`。
+
+**原因：** 原始数据中部分 question 因含引号被 JSON 解析为 list（如 `['"某小学...', '一班...?"']`），而非预期的 str。
+
+**解决：** `_sanitize_question()` 增加类型判断，list 先 `"".join()` 拼回字符串，再清理首尾残留引号和转义字符。
+
+---
+
+## 17. Git index.lock 阻塞操作
+
+**现象：** `git add` 报错 `fatal: Unable to create '.git/index.lock': File exists`。
+
+**原因：** 之前的 git 操作异常退出遗留锁文件。
+
+**解决：** 手动删除：`del .git\index.lock`（Windows）或 `rm .git/index.lock`（Linux）。
+
+---
+
+## 18. DeepSeek API 上下文缓存机制与优化
+
+**发现：** DeepSeek V4 API 内置自动前缀缓存，缓存命中价格仅为未命中的 1/50（$0.0028 vs $0.14/M tokens）。
+
+**问题：** 初始缓存命中率仅 0.2%，因为正确推理和错误推理交替发送，system_prompt 不断切换导致缓存失效。
+
+**解决：** 按 prompt 类型分阶段批处理（方案 B）：
+- Phase 1: 全部正确推理（同一 `_PROMPT_CORRECT`）
+- Phase 2: 全部 simple 错误推理（同一 `_PROMPT_WRONG`）
+- Phase 3: 全部 hard_fallback（`_PROMPT_WRONG_HARD`）
+
+**效果：** 缓存命中率从 0.2% 提升至 **52%**，API 成本大幅降低。
+
+---
+
+## 19. 新增独立失败数据修复脚本 data_repair.py
+
+**需求：** 全量生成后需要修复 api_failed 和 wrong_status=failed 的条目，不想重跑全量。
+
+**设计：**
+- 幂等：每次从 `train_cot_raw.json` 扫描失败条目，修复后原地写回，可反复运行
+- Type A（api_failed/parse_error）：Phase 1 重跑正确推理 → Phase 2 simple 错误推理
+- Type B（wrong_status=failed）：直接跳到 Phase 3 hard_fallback（上一轮 simple 已失败过，不再浪费）
+- 支持 `--limit N` 小批量测试，输出到 `data/processed/test/repair_test_N.json`
+- 复用 `data_builder.py` 的工具函数，不重复造轮子
+
+**用法：**
+```bash
+python -m src.data.data_repair --api_key "$DEEPSEEK_API_KEY"            # 全量修复
+python -m src.data.data_repair --api_key "$DEEPSEEK_API_KEY" --limit 5  # 测试
+```
+
+---
+
+## 20. 错误推理 prompt 优化：剔除错误原因描述
+
+**现象：** 模型在错误推理中会写"误将""不对""等等"之类的词，暴露了故意犯错的意图，不够自然。
+
+**解决：** 在 `_PROMPT_WRONG_HARD` 中增加明确约束：
+```
+不要用"故意""但是""错误地""误将""不对""等等"之类的词。不准写错误原因。
+```
+
+**效果：** 错误推理更加自然，读起来像真实的学生计算错误，没有元认知痕迹。
+
+---
+
+## 21. LaTeX cot 检测与降级
+
+**现象：** 部分正确推理（cot）中包含 LaTeX 格式（如 `\frac`, `\times`, `\pi`），Qwen2.5-0.5B 无法正确学习这种格式。
+
+**解决：** 在 `data_repair.py` 预处理阶段 0a 中：
+- 使用 `re.compile(r'\\[a-zA-Z]')` 检测 LaTeX 命令
+- 含 LaTeX 的 cot 降级为 wrong_cot（作为 DPO 负样本）
+- 清空 cot 和 api_answer，标记为需要重跑正确推理
+- 更新 `_PROMPT_CORRECT` 明确禁止 LaTeX 格式
+
+---
+
+## 22. answer_match=false 强制修正与删除
+
+**现象：** 部分条目 answer_match=false，但同时有 api_answer 和 wrong_answer。
+
+**解决：** 在 `data_repair.py` 预处理阶段 0b 中：
+- 如果 `api_answer == wrong_answer`（两次算出同一答案）→ 强制将 `answer` 修正为该共识答案
+- 如果 `api_answer != wrong_answer`（数据不可靠）→ 从 JSON 数组中彻底移除该记录
+
+---
+
+## 23. Type B 路由优化：区分 fresh 与 failed
+
+**现象：** 重新筛选后，type_b 错误地将从未尝试过 simple 错误推理的"新鲜"条目直接送入 Phase 3 (hard_fallback)，跳过了 3 轮 simple 尝试。
+
+**原因：** 从"按字段值筛选"改为"按实际数据状态筛选"后，type_b 捕获了所有"已匹配但无错误推理"的条目。
+
+**解决：** 将 type_b 拆分为：
+- `type_b_fresh`：无 wrong_status 或 wrong_status 非 failed → 先走 Phase 2 (simple)
+- `type_b_failed`：wrong_status=failed → 直接走 Phase 3 (hard)
+
+同时修复小批量测试模式的 limit 在预处理重新筛选后丢失的问题。
+
+---
+
+## 24. Type C 回收：错误正采样作为 DPO 负样本
+
+**需求：** 正采样结果 answer_match=false（API 算错了），这些错误推理可以直接作为 DPO 负样本使用，无需浪费。
+
+**设计：**
+- 质量门槛：cot 非空、api_answer 非空、cot 长度 ≥ 10
+- 达标的旧 cot/api_answer 保存为 wrong_cot/wrong_answer，wrong_status="recycled"
+- 然后重跑正确推理（合并进 Phase 1）
+- 已回收负样本的条目跳过 Phase 2（不再重复生成错误推理）
+
+**额外检测 — ground_truth_suspect：**
+- 如果重跑后 API 再次给出与回收的 wrong_answer 相同的答案（模型两次算出同一结果，但与标注不同），标记 `wrong_status="ground_truth_suspect"`，清除回收的负样本
+- 这类条目大概率是标注错误，需要人工审查
+
+---
+
+## 25. 按实际数据状态筛选，不依赖特定字段值
+
+**现象：** 部分 JSON 条目缺少 `status`、`wrong_status` 等字段（如早期生成的数据），导致基于字段值的筛选（`status == "api_failed"`）遗漏这些条目。
+
+**解决：** 所有分类逻辑改为检查实际数据状态：
+```python
+has_cot = bool(d.get("cot", "").strip())
+has_api_answer = bool(d.get("api_answer", "").strip())
+matched = d.get("answer_match", False)
+has_wrong = bool(d.get("wrong_cot", "").strip())
+```
+不再依赖 `status`、`wrong_status` 的具体值来决定是否需要修复。
+
+---
+
+## 26. _PROMPT_CORRECT 优化：提升 CoT 质量与可学习性
+
+**需求：** 为 Qwen2.5-0.5B 生成更易学习的细粒度推理链。
+
+**优化项：**
+- LaTeX 禁令从单一示例（frac）扩展为通用规则（`\frac`、`\times`、`\sqrt`、`\pi` 等所有反斜杠命令）
+- 明确运算符号规范：乘号写×，除号写÷，分数写 a/b
+- 答案形式规则细化：百分率 → 25% 形式；分率 → 3/5 形式；能整除给整数，不能整除保留小数或分数
+- 新增推理粒度约束："每步只做一个运算，不要跳步，不要合并多步计算"
+- 用【格式要求】【计算规则】【推理要求】分区，结构更清晰
+
+---
+
+## 27. 缺少 wrong_cot/wrong_answer 字段的条目处理
+
+**现象：** 部分 JSON 条目完全不含 `wrong_cot`、`wrong_answer` 字段（非空字符串，而是字段本身缺失）。
+
+**原因：** 早期 data_builder.py 生成时未写入这些字段，或中途中断。
+
+**解决：** `d.get("wrong_cot", "")` 对缺失字段返回空字符串，`has_wrong` 判定为 False。这些条目会被分类为：
+- `type_b_fresh`（如果正确推理已匹配）→ Phase 2 (simple) → Phase 3 (hard)
+- `type_c`（如果正确推理不匹配）→ 回收 + 重跑
+
+无需特殊处理，通用逻辑已覆盖。
+
+---
+
+## 28. DPO 数据转换 ArrowInvalid：list 与 str 混用
+
+**现象：** 运行 `bash scripts/train.sh dpo cot` 时，DPO 数据加载阶段报错：
+```text
+pyarrow.lib.ArrowInvalid: cannot mix list and non-list, non-null values
+```
+
+**原因：** `Dataset.from_dict()` 会通过 PyArrow 推断列类型，同一列或嵌套字段中不能同时出现 list 和 str。远端 `train_dpo.json` 中部分字段可能来自 OpenAI/DeepSeek 内容块格式，例如 `question=[{"type":"text","text":"..."}]`，而其他样本是普通字符串。`dpo_trainer.py` 又把 `question` 放入 `prompt[1]["content"]`，导致 `prompt.content` 中混入 list 和 str。
+
+**解决：** 新增 `_to_text()` 文本归一化函数，在 DPO 加载和 DPO 数据生成阶段统一把 `question`、`instruction`、`chosen`、`rejected` 转为字符串。
+
+**修改位置：**
+- `src/training/dpo_trainer.py`：`_load_dpo_dataset()` 中调用 `_to_text()`，避免 Arrow 类型推断失败
+- `src/data/preprocessor.py`：`prepare_dpo_data()` 输出前将 `question` 归一化，防止后续生成的新数据再次混入 list
+
+**排查命令：**
+```bash
+python - <<'PY'
+import json, collections
+p = "data/processed/train_dpo.json"
+data = json.load(open(p, encoding="utf-8"))
+for f in ["question", "instruction", "chosen", "rejected"]:
+    c = collections.Counter(type(x.get(f)).__name__ for x in data)
+    print(f, c)
+PY
+```
+
+---
+
+## 29. TRL DPOConfig 参数版本不兼容
+
+**现象：** DPO 数据加载成功后，构造 `DPOConfig` 时报错：
+```text
+TypeError: DPOConfig.__init__() got an unexpected keyword argument 'max_prompt_length'
+```
+
+**原因：** 不同版本 TRL 的 `DPOConfig` API 不一致。当前环境中的 `DPOConfig` 不接受 `max_prompt_length`，而代码固定传入该参数，导致初始化失败。
+
+**解决：** 新增 `_filter_supported_kwargs()`，通过 `inspect.signature()` 检查当前安装版本实际支持的参数，只传入支持的 kwargs。`DPOTrainer` 同样做兼容处理：新版使用 `processing_class=tokenizer`，旧版使用 `tokenizer=tokenizer`。
+
+**修改位置：** `src/training/dpo_trainer.py`
+
+**版本检查命令：**
+```bash
+python - <<'PY'
+import trl, inspect
+from trl import DPOConfig, DPOTrainer
+
+print("trl version:", trl.__version__)
+print("DPOConfig:", inspect.signature(DPOConfig))
+print("DPOTrainer:", inspect.signature(DPOTrainer.__init__))
+PY
+```
+
+---
+
+## 30. TRL Tokenizing 阶段 prompt/list 与 chosen/str 拼接错误
+
+**现象：** `DPOTrainer` 初始化进入 tokenizing 阶段后报错：
+```text
+TypeError: can only concatenate list (not "str") to list
+```
+
+**原因：** 当前 TRL 内部 tokenizing 逻辑会执行：
+```python
+example["prompt"] + example["chosen"]
+```
+当 `prompt` 是 chat message list，而 `chosen` 是普通字符串时，实际变成 `list + str`，无法拼接。
+
+**解决：** 在 `_load_dpo_dataset()` 中提前使用 tokenizer 的 chat template 将 system/user prompt 渲染为字符串：
+```python
+prompt = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True,
+)
+```
+这样传给 TRL 的 `prompt`、`chosen`、`rejected` 三列都是字符串，内部 `prompt + chosen` 可以正常执行。
+
+**修改位置：** `src/training/dpo_trainer.py`，`_load_dpo_dataset(data_path, tokenizer)` 接收 tokenizer 并渲染 prompt 字符串。
+
+**验证：** 修改后至少通过语法检查：
+```bash
+python -m py_compile src/training/dpo_trainer.py src/data/preprocessor.py
+```
+
+---
+
+## 31. GRPO 数据转换 ArrowInvalid：与 DPO 相同的字段类型混用
+
+**现象：** 运行 GRPO 训练时，加载原始训练集并构造 HuggingFace Dataset 报错：
+```text
+pyarrow.lib.ArrowInvalid: cannot mix list and non-list, non-null values
+```
+
+**原因：** `grpo_trainer.py` 原先直接把 `item["question"]` 放入 chat message：
+```python
+{"role": "user", "content": item["question"]}
+```
+当原始数据中部分 `question` 是内容块 list、部分是普通字符串时，`Dataset.from_dict()` 在推断 `prompt.content` 类型时失败。该问题与 DPO 的 ArrowInvalid 本质相同。
+
+**解决：** 抽取 DPO/GRPO 共用 RL 训练工具模块 `src/training/rl_utils.py`：
+- `to_text()`：统一将 str/list/dict/None 转为字符串
+- `render_chat_prompt()`：用 tokenizer 的 chat template 将 messages 渲染为字符串 prompt
+- `filter_supported_kwargs()`：过滤当前 TRL 版本不支持的 Config/Trainer 参数
+- `add_tokenizer_kwarg()`：兼容 `processing_class=tokenizer` 与旧版 `tokenizer=tokenizer`
+
+**修改位置：**
+- `src/training/rl_utils.py`：新增共用工具函数
+- `src/training/dpo_trainer.py`：移除重复 `_to_text()` / `_filter_supported_kwargs()`，改用共用模块
+- `src/training/grpo_trainer.py`：`_build_grpo_dataset(data_path, tokenizer)` 中将 `question` 归一化，并把 chat messages 渲染为字符串 prompt
+
+**验证：**
+```bash
+python -m py_compile src/training/rl_utils.py src/training/dpo_trainer.py src/training/grpo_trainer.py
+```
+
+---
+
+## 32. GRPO 五维奖励函数重新设计
+
+**背景：** 原 GRPO 奖励函数仅有二值正确性 + 格式匹配（`combined_reward`），对 0.5B 小模型来说奖励信号过于稀疏，策略梯度方差大、训练不稳定。参考 DeepSeek-R1、GRPO-LEAD（EMNLP 2025）等工作，重新设计为五维独立奖励函数。
+
+**设计原则：**
+- 正确答案的最低总分 > 错误答案的最高总分（正确排序保证）
+- 负惩罚打破奖励稀疏：错误/无法解析 -0.5，无逻辑词 -0.3，LaTeX -0.3
+- 5 个独立函数，TRL GRPOTrainer 自动求和 + 分维度日志
+
+**五维奖励体系（理论总分 -1.4 ~ +2.15）：**
+
+| 维度 | 函数 | 范围 | 说明 |
+|------|------|------|------|
+| R1 正确性 | `correctness_reward_fn` | -0.5 ~ +1.0 | 精确匹配 +1.0，四舍五入等价 +0.3，错误/无法解析 -0.5 |
+| R2 格式标签 | `format_reward_fn` | 0.0 ~ +0.2 | `<think></think><answer></answer>` 全有 +0.2 |
+| R3 逻辑词 | `logic_word_reward_fn` | -0.3 ~ +0.95 | 基础组 ×0.05 + 结构组 ×0.10，按种类数计分，0 命中 -0.3 |
+| R4 长度正则 | `length_reward_fn` | -0.3 ~ 0.0 | <30 字符 -0.3，>300 字符 -0.2，合理范围 0.0 |
+| R5 无 LaTeX | `no_latex_reward_fn` | -0.3 ~ 0.0 | 含 LaTeX 命令 -0.3，否则 0.0 |
+
+**关键设计点：**
+- **四舍五入等价**：`_round_match()` 将预测和标准答案 round 到较少的小数位数比较；仅在题目不含"保留""精确到"关键词时启用
+- **逻辑词分组**：基础组（即/所以/因此/得到/那么）高频但信息量低，结构组（首先/已知/题意/设/因为/由于/根据）低频但信息量高
+- **长度阈值数据驱动**：基于 train_cot 正样本统计（min=21, p10=48, median=79, p90=145）设定
+
+**配置变更（grpo.yaml）：**
+- `num_generations`: 4 → 16（28GB 显存 + 0.5B 模型，保证 advantage 稳定）
+- `temperature`: 0.7 → 0.8（增加探索多样性）
+- `learning_rate`: 1.0e-5 → 5.0e-6（保守防退化）
+- `max_grad_norm`: 新增 0.1（激进梯度裁剪）
+
+**修改位置：**
+- `src/models/reward.py`：完全重写，5 个独立奖励函数 + `build_reward_funcs()`
+- `src/training/grpo_trainer.py`：`_make_reward_funcs()` 改用 `build_reward_funcs()`
+- `configs/cot/grpo.yaml`：更新训练超参数，移除旧 reward 配置节
+
+**验证：**
+```bash
+python -c "import ast; ast.parse(open('src/models/reward.py').read()); print('OK')"
+python -c "import ast; ast.parse(open('src/training/grpo_trainer.py').read()); print('OK')"
+python -c "import yaml; yaml.safe_load(open('configs/cot/grpo.yaml')); print('OK')"
+```
+
+---
+
+## 33. 表达式数据断点续传固化坏样本
+
+**现象：** `expr_builder.py` 生成的数据中存在不合规记录，例如正确表达式算错、错误表达式反而算对、错误表达式不可解析。重新运行脚本时，这些记录因为已有相同 `id` 被断点续传直接跳过，坏数据被固化。
+
+**原因：** 原逻辑只按 `id` 判断是否已处理：已有结果直接跳过，没有检查该结果是否满足当前模式的质量要求。
+
+**合规规则：**
+
+正确表达式模式（`correct`）：
+```python
+status == "ok" and valid is True and expression 非空
+```
+
+错误表达式模式（`wrong`）：
+```python
+status == "ok" and valid is False and eval_result is not None and expression 非空
+```
+
+**解决：** 在 `src/data/expr_builder.py` 中新增质量门控和自动重算：
+
+- 新增 `MAX_REPAIR_ATTEMPTS = 3`
+- 新增 `_is_compliant_expr_record()` 判断已有记录是否可复用
+- 新增 `_repair_reason()` 标记不合规原因
+- 断点续传时只跳过合规记录，不合规记录进入重算队列
+- 每条不合规记录最多重算 3 次，仍失败则保留最后一次结果
+- 输出增加 `attempts` 和 `repair_reason` 诊断字段
+- `convert_sft_format()` / `convert_to_dpo_format()` 仍只使用合规记录
+
+**常见 repair_reason：**
+
+- `correct_invalid`：正确表达式模式下结果不匹配
+- `wrong_accidentally_correct`：错误表达式模式下反而算对
+- `wrong_unparseable`：错误表达式不可解析
+- `api_failed`：API 调用失败
+- `empty_expression`：表达式为空
+
+**验证：**
+```bash
+python -m py_compile src/data/expr_builder.py
+```
+
+---
+
+## 34. 规则增强禁替换常数黑名单
+
+**背景：** `rule_augmentor.py` 做数字替换增强时，某些常数不能被替换，否则会破坏题意。例如 "圆周率取 3.14" 中的 3.14、"一年有 12 个月" 中的 12。
+
+**解决：** 在 `src/data/rule_augmentor.py` 中新增 `_FROZEN_NUMBERS` 黑名单集合：
+
+```
+3.14, 0, 1, 2, 7, 10, 12, 24, 30, 60, 100, 180, 360, 365, 1000
+```
+
+在 `_augment_one()` 中过滤掉黑名单数字，只替换题目特有的数值。
+
+---
+
+## 35. expr_builder 失败记录自动导出审计候选
+
+**背景：** `expr_builder.py` 3 次重算仍失败的记录，高概率是题目本身有问题（歧义、OCR 错误、标注错误）。需要自动导出到 `quality_candidates.json`，供 `quality_auditor.py` 统一审计。
+
+**解决：** 在 `src/data/expr_builder.py` 中新增 `export_failed_to_candidates()` 函数：
+
+- 收集 correct 和 wrong 两个模式中 3 次重算仍不合规的记录
+- 两个模式都失败的题目 risk_score=0.9（高概率题目有问题）
+- 仅单模式失败的题目 risk_score=0.7
+- 新增 CLI 命令 `export_failed`
+
+**运行命令：**
+```bash
+python -m src.data.expr_builder export_failed
+# 或
+bash scripts/data.sh expr-build export_failed
+```
+
+**输出文件：** `data/processed/quality_candidates.json`
+
+**下游流程：** `quality_auditor.py` 读取候选 → 大模型审计 → 高门槛修复
+
+---
+
+## 36. CoT DPO/GRPO 评测错误加载 raw base
+
+**现象：** Few-shot CoT prompt ablation 中，`dpo` 与 `grpo` 验证准确率远低于 `sft_cot`，且大量输出缺少闭合 `<answer>` 标签。典型结果中 `dpo` 只有 15%~21% 准确率，`grpo` 约 46%~51%，missing answer tag 大幅高于 SFT。
+
+**直接原因：** ablation 推理脚本把 `sft_cot`、`dpo`、`grpo` 都按 `raw Qwen base + 单个 LoRA adapter` 加载。这个方式对 `sft_cot` 正确，但对 DPO/GRPO 错误。DPO/GRPO 训练时先加载 `sft_cot` adapter 并 `merge_and_unload()` 到 base，再挂新的 LoRA 训练；因此推理时必须使用 `SFT-merged base + dpo/grpo adapter`。
+
+**影响：** 旧目录 `outputs/evaluation/cot_prompt_ablation` 中的 DPO/GRPO 结果可能低估了二阶段 checkpoint，不能直接作为是否重训的证据。
+
+**解决：**
+- `cot_prompt_ablation.py` 新增运行时模型规格解析：`sft_cot` 使用 raw base，`dpo`/`grpo` 使用 SFT-merged base。
+- 缓存 `outputs/checkpoints/sft_cot_merged`，并写入元数据；当 raw base 或 SFT adapter 指纹不一致时自动重建。
+- vLLM 按 base path 分组加载：raw base 组只跑 SFT，SFT-merged base 组复用同一个 vLLM 实例跑 DPO/GRPO LoRA。
+- 默认输出目录改为 `outputs/evaluation/cot_prompt_ablation_fixed_base`，与旧错误加载结果隔离。
+
+**重训判断：** 本次不立即重训。先用修复后的加载方式重跑 validation ablation；若 DPO/GRPO 仍缺 `<answer>` 超过 5%，或验证准确率低于 `sft_cot direct` 超过 2 个百分点，再进入对应重训计划。
+
+**次级风险：** GRPO reward 中格式奖励仅为 `+0.2` 且缺标签无负惩罚，正确性 reward 又允许从无标签文本兜底抽取答案。这会弱化 `<answer>` 约束，但属于下一阶段 reward/重训问题，不在本次修复中修改。
+
+---
+
+## 37. Fixed-base CoT ablation 结果与重训决策
+
+**背景：** 修复 DPO/GRPO 评测基座后，重新在 `outputs/evaluation/cot_prompt_ablation_fixed_base` 跑 validation ablation。该实验保持 checkpoint 不变，只比较 inference prompt，并且 DPO/GRPO 均使用训练时对应的 `SFT-merged base + adapter`。
+
+**验证准确率：**
+
+| Model | 最佳 Prompt | Accuracy | Missing answer tag | 结论 |
+|---|---|---:|---:|---|
+| `sft_cot` | `direct` | 0.7376 | 16 | 当前最强单模型，应作为 CoT 主模型 |
+| `grpo` | `zero_shot_cot` | 0.6347 | 185 | 比错误加载版显著恢复，但仍明显低于 SFT |
+| `grpo` | `few_shot_cot` | 0.6312 | 5 | 格式几乎恢复，但准确率仍低，说明主要问题转为推理能力退化 |
+| `dpo` | `few_shot_cot` | 0.4333 | 93 | few-shot 能修复大量格式，但推理质量仍不可作为主模型 |
+
+**关键观察：**
+- 修复基座加载是有效的：`dpo few_shot_cot` 从约 0.2075 提升到 0.4333，`grpo few_shot_cot` 从约 0.5092 提升到 0.6312。
+- few-shot 不是通用收益：`sft_cot direct` 为 0.7376，而 `sft_cot few_shot_cot` 降到 0.7027，说明 SFT 更适合短 direct prompt。
+- DPO 的 few-shot 增益主要来自格式/行为修复，而不是推理能力恢复；有标签样本仍大量算错。
+- GRPO few-shot 的 missing tag 只有 5/1147，但准确率仍低于 SFT direct 约 10.6 个百分点，说明剩余问题主要是二阶段训练损伤求解能力，而不是答案抽取格式。
+
+**互补性：**
+- `sft_cot:direct + grpo:zero_shot_cot` oracle accuracy 为 0.7969。
+- `sft_cot:direct + grpo:few_shot_cot` oracle accuracy 为 0.7986。
+- `sft_cot:direct + dpo:few_shot_cot + grpo:zero_shot_cot` oracle accuracy 为 0.8221。
+
+这说明 DPO/GRPO 仍有少量互补样本，可以作为投票候选，但不能作为主模型。
+
+**当前使用建议：**
+- 单模型提交优先使用 `sft_cot` + `direct`。
+- Ensemble 中以 `sft_cot:direct` 为主权重，`grpo:zero_shot_cot` 或 `grpo:few_shot_cot` 作为辅助候选。
+- `dpo:few_shot_cot` 权重应很低，或先不进入最终投票。
+
+**重训决策：**
+- 不需要重训 SFT。
+- GRPO 触发后续重训门槛：即使格式恢复，准确率仍低于 SFT direct 超过 2 个百分点。下一步应先调整 CoT GRPO reward，再从 `sft_cot` 重新训练 GRPO。
+- DPO 不建议立刻重训；应先审计 `train_dpo.json`、DPO loss、学习率、响应截断和 pair 质量，再决定是否重训。
+
+**GRPO reward 后续方向：**
+- 提高正确性奖励相对权重。
+- 对缺失 `<answer>` 增加负惩罚。
+- 正确性 reward 优先或只信任 `<answer>` 内答案，避免无标签文本靠兜底抽取拿高分。
+- 降低逻辑词奖励权重，避免模型学会“像在推理”但不真正算对。
+
+---
+
+## 38. CoT 修复实验基础设施（SFT 主线 + GRPO reward smoke + DPO 审计）
+
+**目标：** 固化当前可用 CoT 主线，同时为下一轮 GRPO reward 重训和 DPO 审计提供可复现入口。本轮不重训 SFT，不直接替换主模型。
+
+**当前固化策略：**
+- 单模型：`sft_cot:direct`，fixed-base validation accuracy = 0.7376。
+- 离线 ensemble 初始权重：`sft_cot:direct=1.0`，`grpo:zero_shot_cot=0.35`，`grpo:few_shot_cot=0.30`，`dpo:few_shot_cot=0.0`。
+- 验收门槛：离线 weighted vote 不能低于 `sft_cot:direct` 的 0.7376；若低于，当前提交只使用 `sft_cot:direct`。
+
+**已实现工具：**
+- `src/analysis/cot_ensemble_offline.py`：读取 `cot_prompt_ablation_fixed_base` 的 details 文件，做 prompt-specific weighted vote，输出 `ensemble_report.json`、`ensemble_summary.md`、`ensemble_predictions.csv`。
+- `src/models/reward.py`：保留 `legacy` reward，同时新增 `strict` 与 `balanced` 两套 CoT GRPO reward variant。`strict` 只信任 `<answer>` 内答案；`balanced` 允许无标签兜底但降级给分；两者都对缺 `<answer>` 给负惩罚，并把逻辑词奖励上限降到 0.15。
+- `src/training/grpo_trainer.py`：支持从配置读取 reward variant，并补齐 `training.max_steps`，用于小步数 smoke。
+- `configs/experiments/grpo_cot_reward_strict_smoke.yaml` 与 `configs/experiments/grpo_cot_reward_balanced_smoke.yaml`：从 `outputs/checkpoints/sft_cot/best` 开始训练，输出到独立 smoke checkpoint，不覆盖 `outputs/checkpoints/grpo`。
+- `src/analysis/dpo_audit.py`：审计 DPO pair 质量、token 截断风险、`trainer_state.json` loss/learning-rate/margin 曲线，并生成中间 checkpoint validation 命令。
+- `cot_prompt_ablation.py`：新增 `--sft_adapter_path`、`--dpo_adapter_path`、`--grpo_adapter_path`，便于对 DPO/GRPO 中间 checkpoint 跑 fixed-base validation。
+
+**运行命令：**
+```bash
+bash scripts/evaluate.sh cot-ensemble
+bash scripts/train.sh grpo cot smoke strict
+bash scripts/train.sh grpo cot smoke balanced
+bash scripts/evaluate.sh dpo-audit
+```
+
+**Smoke 后全量训练命令：**
+```bash
+bash scripts/train.sh grpo cot full
+```
+
+**全量训练后验证命令：**
+```bash
+OUTPUT_DIR=outputs/evaluation/grpo_cot_reward_balanced_full \
+MODELS=grpo PROMPTS=direct,zero_shot_cot,few_shot_cot \
+bash scripts/evaluate.sh cot-ablation val \
+  --grpo_adapter_path outputs/checkpoints/grpo_cot_reward_balanced_full/best
+```
+
+**GRPO smoke 选择门槛：**
+- validation accuracy 必须高于当前最佳 GRPO `grpo:zero_shot_cot = 0.6347`。
+- missing answer tag 必须 <= 5%。
+- 两版都过关时，选 validation accuracy 更高者；若相差小于 1 个百分点，选 missing tag 更低者。
+
+**Smoke 结果（2026-06-11）：**
+
+| Reward variant | 最佳 Prompt | Accuracy | Correct / Total | Missing answer tag | 决策 |
+|---|---|---:|---:|---:|---|
+| `balanced` | `direct` | 0.7358 | 844 / 1147 | 15 | 胜出，进入全量训练 |
+| `strict` | `direct` | 0.7350 | 843 / 1147 | 17 | 通过门槛，但低于 balanced |
+
+两版均超过旧 GRPO 最佳 0.6347，且 missing tag 均低于 5%。`balanced:direct` 比 `strict:direct` 多对 1 题，missing tag 少 2 条，因此选择 `balanced` 做全量 GRPO。few-shot prompt 在两版上都低于 direct，后续评测/提交以 `direct` 为主。
+
+**全量 GRPO 替换门槛：** 新 GRPO 必须达到或超过 `sft_cot:direct = 0.7376`，且 missing answer tag <= 5%。未达标则不替换主模型，只保留实验记录。
+
+**DPO 后续门槛：** 先审计 pair、截断、loss 和中间 checkpoint。只有当某个中间 checkpoint 明显接近或超过当前 `dpo:few_shot_cot = 0.4333` 且格式稳定时，才考虑 DPO 重训；若发现长尾/截断严重，先清洗 pair 并降低学习率后再设计重训。
+
+---
+
+## 39. GRPO smoke 配置同时设置互斥 generation 参数
+
+**现象：** 运行 `bash scripts/train.sh grpo cot smoke all` 时，strict/balanced 都在创建 `GRPOConfig` 阶段报错：`'generation_batch_size' and 'steps_per_generation' can not be both configured at the same time`。
+
+**原因：** TRL 的 `GRPOConfig` 将 `generation_batch_size` 和 `steps_per_generation` 视为互斥参数。本轮 smoke 配置同时写了两者，trainer 又原样传入，导致训练还未开始就失败。日志中的 `warmup_ratio` 是 deprecation warning，不是本次 fatal error。
+
+**解决：**
+- smoke 配置只保留 `generation_batch_size`，删除 `steps_per_generation`，优先控制 generation 显存与批大小。
+- `src/training/rl_utils.py` 新增 `drop_conflicting_grpo_generation_args()`，当后续配置再次同时设置两者时，自动保留 `generation_batch_size` 并丢弃 `steps_per_generation`。
+- CoT GRPO trainer 与表达式 GRPO trainer 都接入该 helper，避免同类问题扩散。
+
+---
+
+## 40. Balanced full GRPO 低于 smoke 且未达替换门槛
+
+**现象：** `balanced` reward smoke 表现接近 SFT 主线，但按 `configs/experiments/grpo_cot_reward_balanced_full.yaml` 全量训练后，fixed-base validation ablation 下降明显：
+
+| Prompt | Accuracy | Correct / Total | Missing answer tag | 结论 |
+|---|---:|---:|---:|---|
+| `direct` | 0.6922 | 794 / 1147 | 165 | 格式退化明显，不可用作主模型 |
+| `zero_shot_cot` | 0.7010 | 804 / 1147 | 49 | 全量 checkpoint 最佳 prompt，但仍低于 SFT 主线 |
+| `few_shot_cot` | 0.6888 | 790 / 1147 | 3 | 格式稳定但准确率最低 |
+
+**对比门槛：**
+- 旧 GRPO smoke 进入全量门槛：高于 0.6347 且 missing tag <= 5%。该 full checkpoint 的 `zero_shot_cot` 仍满足这个低门槛。
+- 主模型替换门槛：达到或超过 `sft_cot:direct = 0.7376` 且 missing tag <= 5%。该 full checkpoint 最佳只有 0.7010，未达标。
+
+**原因判断：** smoke 的高分没有在全量训练中保持，说明继续训练一整个 epoch 可能引入策略退化/过训练；同时 `direct` missing tag 从 smoke 的 15 上升到 165，说明格式约束在全量训练中仍不稳定。few-shot 能把 missing tag 压到 3，但没有恢复准确率，问题不只是标签格式。
+
+**训练耗时问题：** full 配置未设置 `training.max_steps`，继承 `num_train_epochs: 1` 后会跑完整训练集。实际进度显示约 `5999` step，`1.87s/it` 时 ETA 约 3 小时，作为快速实验偏慢。
+
+**决策：**
+- 不替换当前主模型，当前单模型仍使用 `sft_cot:direct`。
+- 不把该 full GRPO 提升为高权重投票候选；如需使用，只能低权重或仅做错误分析。
+- 下一轮不要直接跑完整 1 epoch，应先用 staged full / capped full，例如设置 `max_steps` 做 800、1500、3000 step checkpoint sweep，再按 fixed-base validation 选择最佳 checkpoint。
+- 继续优化 GRPO reward 时，应重点防止 full training 后的 `<answer>` 格式退化，并观察 direct/zero-shot/few-shot 三种 prompt 的分叉。
+
+---
+
+## 待解决 / 后续计划
+
+| 编号 | 事项 | 状态 |
+|------|------|------|
+| 1 | ~~DeepSeek API 小批量测试~~ | ✅ 已完成 |
+| 2 | 全量 CoT 数据生成（12000条） | 进行中 |
+| 3 | ~~换 deepseek-v4-flash 降成本~~ | ✅ 已切换 |
+| 4 | 考虑 SiliconFlow 免费 API（Qwen3-8B） | 待决策 |
+| 5 | CoT SFT 训练 | 待执行 |
+| 6 | DPO 训练（偏好对数据） | 待执行 |
+| 7 | GRPO 训练 | 进行中 |
+| 8 | 全部方案推理+提交 | 待执行 |
+| 9 | 课程报告撰写 | 待执行 |
+| 10 | 失败数据修复（data_repair.py） | 进行中 |
+| 11 | 表达式数据构建 | 进行中 |
+| 12 | 表达式 SFT + GRPO 训练 | 待执行 |
+| 13 | 数据质量审计（quality_auditor） | 待执行 |
+| 14 | 规则数据增强（rule_augmentor） | 待执行 |
+| 15 | 4 模型投票推理 | 待执行 |
