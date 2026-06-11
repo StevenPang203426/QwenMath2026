@@ -446,6 +446,22 @@ def cleanup_model(model: Any) -> None:
         pass
 
 
+def cleanup_vllm_model(llm: Any) -> None:
+    try:
+        engine = getattr(llm, "llm_engine", None)
+        engine_core = getattr(engine, "engine_core", None)
+        if engine_core is not None and hasattr(engine_core, "shutdown"):
+            engine_core.shutdown(timeout=5)
+    except TypeError:
+        try:
+            engine_core.shutdown()
+        except Exception as exc:
+            logger.warning("Failed to shutdown vLLM engine core cleanly: %s", exc)
+    except Exception as exc:
+        logger.warning("Failed to shutdown vLLM engine core cleanly: %s", exc)
+    cleanup_model(llm)
+
+
 def normalize_answer_safe(raw_answer: Any, question: Any) -> str:
     try:
         return normalize_answer_for_question(str(raw_answer), question)
@@ -799,7 +815,7 @@ def prepare_dataset_details(
                         write_json(detail_file(output_dir, prefix, model_name, prompt_name), merged_file_details)
                         write_csv(csv_file(output_dir, prefix, model_name, prompt_name), details_to_rows(records, details))
             finally:
-                cleanup_model(llm)
+                cleanup_vllm_model(llm)
         return details_by_combo
 
     from src.models.model_loader import load_peft_model

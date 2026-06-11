@@ -11,6 +11,7 @@ from src.inference.cot_prompt_ablation import (
     build_parser,
     build_prompt_disagreements,
     build_prompt_messages,
+    cleanup_vllm_model,
     exact_sign_test_p_value,
     filter_complete_details_for_records,
     generate_raw_outputs_vllm_batch,
@@ -133,6 +134,30 @@ def test_resume_helpers_reuse_existing_rows_and_keep_missing_records():
     assert [item for item in merged if item["id"] == "2" and item["prompt"] == "direct"][0]["answer"] == "22"
 
 
+def test_cleanup_vllm_model_shutdowns_engine_core_before_releasing_cache():
+    class FakeEngineCore:
+        def __init__(self):
+            self.calls = []
+
+        def shutdown(self, timeout=None):
+            self.calls.append(timeout)
+
+    class FakeEngine:
+        def __init__(self):
+            self.engine_core = FakeEngineCore()
+
+    class FakeLLM:
+        def __init__(self):
+            self.llm_engine = FakeEngine()
+
+    llm = FakeLLM()
+    engine_core = llm.llm_engine.engine_core
+
+    cleanup_vllm_model(llm)
+
+    assert engine_core.calls == [5]
+
+
 def test_runtime_specs_keep_sft_on_raw_base_and_rl_on_sft_merged_base():
     original_ensure_checkpoint = ablation.ensure_checkpoint
     calls = []
@@ -251,6 +276,7 @@ if __name__ == "__main__":
     test_paired_summary_counts_prompt_wins_and_sign_test()
     test_disagreements_include_answer_or_correctness_changes()
     test_resume_helpers_reuse_existing_rows_and_keep_missing_records()
+    test_cleanup_vllm_model_shutdowns_engine_core_before_releasing_cache()
     test_runtime_specs_keep_sft_on_raw_base_and_rl_on_sft_merged_base()
     test_vllm_generation_uses_lora_request_and_counts_prompt_tokens()
     test_parser_defaults_to_vllm_with_large_batch_for_ablation()
