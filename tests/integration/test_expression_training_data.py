@@ -139,9 +139,9 @@ def test_math_dataset_can_train_expression_targets():
 
 
 def test_expression_clean_configs_select_expression_targets_and_stable_grpo():
-    sft = load_config("configs/sft_expr_clean.yaml")
-    grpo = load_config("configs/grpo_expr_clean.yaml")
-    grpo_from_dpo = load_config("configs/grpo_expr_from_dpo_clean.yaml")
+    sft = load_config("configs/expr/sft_expr_clean.yaml")
+    grpo = load_config("configs/expr/grpo_expr_clean.yaml")
+    grpo_from_dpo = load_config("configs/expr/grpo_expr_from_dpo_clean.yaml")
 
     assert sft.data.target_format == "expression"
     assert sft.data.train_path == "data/splits/train_expr_clean_train.json"

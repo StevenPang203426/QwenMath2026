@@ -1,5 +1,6 @@
 """Tests for CoT repair experiment helper tools."""
 import sys
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
@@ -104,9 +105,9 @@ def test_grpo_generation_schedule_args_are_mutually_exclusive():
 
 
 def test_smoke_configs_do_not_overwrite_formal_grpo_checkpoint():
-    strict = load_config("configs/grpo_cot_reward_strict_smoke.yaml")
-    balanced = load_config("configs/grpo_cot_reward_balanced_smoke.yaml")
-    full = load_config("configs/grpo_cot_reward_balanced_full.yaml")
+    strict = load_config("configs/experiments/grpo_cot_reward_strict_smoke.yaml")
+    balanced = load_config("configs/experiments/grpo_cot_reward_balanced_smoke.yaml")
+    full = load_config("configs/experiments/grpo_cot_reward_balanced_full.yaml")
 
     assert strict.reward.variant == "strict"
     assert balanced.reward.variant == "balanced"
@@ -122,9 +123,39 @@ def test_smoke_configs_do_not_overwrite_formal_grpo_checkpoint():
     assert getattr(balanced.grpo, "steps_per_generation", None) is None
 
 
+
+def test_root_config_shims_are_removed():
+    obsolete = [
+        "sft_baseline.yaml",
+        "sft_cot.yaml",
+        "dpo.yaml",
+        "grpo.yaml",
+        "sft_expr.yaml",
+        "sft_expr_clean.yaml",
+        "sft_expr_safe.yaml",
+        "dpo_expr.yaml",
+        "dpo_expr_clean.yaml",
+        "grpo_expr.yaml",
+        "grpo_expr_clean.yaml",
+        "grpo_expr_clean_fast.yaml",
+        "grpo_expr_clean_vllm.yaml",
+        "grpo_expr_from_dpo.yaml",
+        "grpo_expr_from_dpo_clean.yaml",
+        "grpo_expr_from_dpo_clean_fast.yaml",
+        "grpo_expr_from_dpo_clean_vllm.yaml",
+        "grpo_cot_reward_balanced_full.yaml",
+        "grpo_cot_reward_balanced_smoke.yaml",
+        "grpo_cot_reward_strict_smoke.yaml",
+        "infer.yaml",
+    ]
+    existing = [path for path in obsolete if Path("configs", path).exists()]
+    assert not existing, f"root config shims should be removed: {existing}"
+
+
 if __name__ == "__main__":
     test_offline_weighted_vote_is_stable_and_prompt_specific()
     test_dpo_audit_counts_pair_quality_and_token_truncation()
     test_grpo_generation_schedule_args_are_mutually_exclusive()
     test_smoke_configs_do_not_overwrite_formal_grpo_checkpoint()
+    test_root_config_shims_are_removed()
     print("cot experiment tool tests: ALL PASSED")
