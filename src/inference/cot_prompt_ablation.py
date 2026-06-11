@@ -237,17 +237,19 @@ def resolve_model_runtime_specs(
     raw_base_model_name: str,
     sft_merged_dir: str = DEFAULT_SFT_MERGED_DIR,
     ensure_merged_base: Callable[[str, str, str], str] = ensure_sft_cot_merged_base,
+    model_specs: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, dict[str, str]]:
-    adapter_paths = {model_name: ensure_checkpoint(MODEL_SPECS[model_name]) for model_name in model_names}
-    needs_sft_merged = any(MODEL_SPECS[model_name].get("base_role") == SFT_MERGED_BASE_ROLE for model_name in model_names)
+    specs = model_specs or MODEL_SPECS
+    adapter_paths = {model_name: ensure_checkpoint(specs[model_name]) for model_name in model_names}
+    needs_sft_merged = any(specs[model_name].get("base_role") == SFT_MERGED_BASE_ROLE for model_name in model_names)
     sft_merged_base = ""
     if needs_sft_merged:
-        sft_adapter_path = adapter_paths.get("sft_cot") or ensure_checkpoint(MODEL_SPECS["sft_cot"])
+        sft_adapter_path = adapter_paths.get("sft_cot") or ensure_checkpoint(specs["sft_cot"])
         sft_merged_base = ensure_merged_base(raw_base_model_name, sft_adapter_path, sft_merged_dir)
 
     runtime_specs: dict[str, dict[str, str]] = {}
     for model_name in model_names:
-        spec = MODEL_SPECS[model_name]
+        spec = specs[model_name]
         base_role = spec.get("base_role", RAW_BASE_ROLE)
         base_model_name = raw_base_model_name if base_role == RAW_BASE_ROLE else sft_merged_base
         runtime_specs[model_name] = {
@@ -257,6 +259,19 @@ def resolve_model_runtime_specs(
             "base_role": base_role,
         }
     return runtime_specs
+
+
+def build_model_specs_with_overrides(args: argparse.Namespace) -> dict[str, dict[str, str]]:
+    specs = {name: dict(spec) for name, spec in MODEL_SPECS.items()}
+    overrides = {
+        "sft_cot": getattr(args, "sft_adapter_path", ""),
+        "dpo": getattr(args, "dpo_adapter_path", ""),
+        "grpo": getattr(args, "grpo_adapter_path", ""),
+    }
+    for model_name, adapter_path in overrides.items():
+        if adapter_path:
+            specs[model_name]["adapter_path"] = adapter_path
+    return specs
 
 
 def group_model_names_by_base(
@@ -1240,7 +1255,8 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model_names = parse_names(args.models, MODEL_SPECS.keys(), "models")
+    model_specs = build_model_specs_with_overrides(args)
+    model_names = parse_names(args.models, model_specs.keys(), "models")
     prompt_names = parse_names(args.prompts, PROMPT_NAMES, "prompts")
     if args.engine not in ENGINE_NAMES:
         raise ValueError(f"Unknown engine: {args.engine}; available={ENGINE_NAMES}")
@@ -1254,6 +1270,7 @@ def run_ablation(args: argparse.Namespace) -> dict[str, Any]:
         model_names=model_names,
         raw_base_model_name=base_model_name,
         sft_merged_dir=args.sft_merged_dir,
+        model_specs=model_specs,
     )
 
     val_details = prepare_dataset_details(
@@ -1354,6 +1371,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--models", default="sft_cot,dpo,grpo")
     parser.add_argument("--prompts", default="direct,zero_shot_cot,few_shot_cot")
     parser.add_argument("--base_model", default="")
+    parser.add_argument("--sft_adapter_path", default="")
+    parser.add_argument("--dpo_adapter_path", default="")
+    parser.add_argument("--grpo_adapter_path", default="")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--max_new_tokens", type=int, default=512)

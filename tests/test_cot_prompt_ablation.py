@@ -8,6 +8,7 @@ sys.path.insert(0, ".")
 import src.inference.cot_prompt_ablation as ablation
 from src.inference.cot_prompt_ablation import (
     DEFAULT_OUTPUT_DIR,
+    build_model_specs_with_overrides,
     build_parser,
     build_prompt_disagreements,
     build_prompt_messages,
@@ -158,6 +159,21 @@ def test_cleanup_vllm_model_shutdowns_engine_core_before_releasing_cache():
     assert engine_core.calls == [5]
 
 
+def test_model_specs_accept_adapter_path_overrides():
+    args = build_parser().parse_args([
+        "--sft_adapter_path", "custom/sft",
+        "--dpo_adapter_path", "custom/dpo",
+        "--grpo_adapter_path", "custom/grpo",
+    ])
+
+    specs = build_model_specs_with_overrides(args)
+
+    assert specs["sft_cot"]["adapter_path"] == "custom/sft"
+    assert specs["dpo"]["adapter_path"] == "custom/dpo"
+    assert specs["grpo"]["adapter_path"] == "custom/grpo"
+    assert specs["dpo"]["base_role"] == "sft_cot_merged"
+
+
 def test_runtime_specs_keep_sft_on_raw_base_and_rl_on_sft_merged_base():
     original_ensure_checkpoint = ablation.ensure_checkpoint
     calls = []
@@ -252,6 +268,9 @@ def test_parser_defaults_to_vllm_with_large_batch_for_ablation():
     assert args.batch_size == 64
     assert args.vllm_max_model_len == 2048
     assert args.vllm_max_num_seqs == 64
+    assert args.sft_adapter_path == ""
+    assert args.dpo_adapter_path == ""
+    assert args.grpo_adapter_path == ""
     assert args.vllm_enforce_eager is False
     assert args.vllm_show_progress is False
 
@@ -277,6 +296,7 @@ if __name__ == "__main__":
     test_disagreements_include_answer_or_correctness_changes()
     test_resume_helpers_reuse_existing_rows_and_keep_missing_records()
     test_cleanup_vllm_model_shutdowns_engine_core_before_releasing_cache()
+    test_model_specs_accept_adapter_path_overrides()
     test_runtime_specs_keep_sft_on_raw_base_and_rl_on_sft_merged_base()
     test_vllm_generation_uses_lora_request_and_counts_prompt_tokens()
     test_parser_defaults_to_vllm_with_large_batch_for_ablation()
