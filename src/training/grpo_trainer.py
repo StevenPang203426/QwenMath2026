@@ -15,6 +15,7 @@ from src.models.reward import build_reward_funcs
 from src.data.answer_extractor import extract_answer
 from src.training.rl_utils import (
     add_tokenizer_kwarg,
+    drop_conflicting_grpo_generation_args,
     filter_supported_kwargs,
     render_chat_prompt,
     to_text,
@@ -74,12 +75,15 @@ def _make_reward_funcs(config):
       5. 无LaTeX  (-0.3 ~  0.0)
 
     Args:
-        config: 配置对象（保留参数以兼容调用方式）
+        config: 配置对象，可通过 reward.variant / reward.cot_variant 选择 legacy/strict/balanced
 
     Returns:
         奖励函数列表
     """
-    return build_reward_funcs()
+    reward_cfg = getattr(config, "reward", None)
+    variant = getattr(reward_cfg, "variant", getattr(reward_cfg, "cot_variant", "legacy")) if reward_cfg else "legacy"
+    logger.info("使用 CoT GRPO reward variant: %s", variant)
+    return build_reward_funcs(config)
 
 
 def train_grpo(config_path: str) -> None:
@@ -137,6 +141,7 @@ def train_grpo(config_path: str) -> None:
         "per_device_train_batch_size": config.training.per_device_train_batch_size,
         "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
         "num_train_epochs": config.training.num_train_epochs,
+        "max_steps": getattr(config.training, "max_steps", -1),
         "learning_rate": config.training.learning_rate,
         "warmup_ratio": getattr(config.training, "warmup_ratio", 0.1),
         "lr_scheduler_type": getattr(config.training, "lr_scheduler_type", "cosine"),
@@ -147,6 +152,7 @@ def train_grpo(config_path: str) -> None:
         "gradient_checkpointing": config.training.gradient_checkpointing,
         # GRPO 特有参数
         "num_generations": grpo_cfg.num_generations,
+        "num_generations_eval": getattr(grpo_cfg, "num_generations_eval", None),
         "max_completion_length": getattr(grpo_cfg, "max_completion_length", 512),
         "max_prompt_length": getattr(grpo_cfg, "max_prompt_length", 256),
         "temperature": grpo_cfg.temperature,
@@ -154,9 +160,15 @@ def train_grpo(config_path: str) -> None:
         "report_to": "wandb",
         # 加速参数
         "use_vllm": getattr(grpo_cfg, "use_vllm", False),
+        "vllm_mode": getattr(grpo_cfg, "vllm_mode", "colocate"),
+        "vllm_gpu_memory_utilization": getattr(grpo_cfg, "vllm_gpu_memory_utilization", 0.3),
+        "vllm_max_model_length": getattr(grpo_cfg, "vllm_max_model_length", None),
+        "generation_batch_size": getattr(grpo_cfg, "generation_batch_size", None),
+        "steps_per_generation": getattr(grpo_cfg, "steps_per_generation", None),
         "dataloader_num_workers": getattr(config.training, "dataloader_num_workers", 0),
         "max_grad_norm": getattr(config.training, "max_grad_norm", 1.0),
     }
+    grpo_kwargs = drop_conflicting_grpo_generation_args(grpo_kwargs, logger)
     grpo_config = GRPOConfig(**filter_supported_kwargs(GRPOConfig, grpo_kwargs))
 
     # GRPO Trainer

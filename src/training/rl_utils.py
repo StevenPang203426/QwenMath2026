@@ -47,3 +47,25 @@ def add_tokenizer_kwarg(trainer_cls: Any, kwargs: dict[str, Any], tokenizer: Any
         kwargs["processing_class"] = tokenizer
     elif "tokenizer" in params:
         kwargs["tokenizer"] = tokenizer
+
+
+def drop_conflicting_grpo_generation_args(kwargs: dict[str, Any], logger: Any | None = None) -> dict[str, Any]:
+    """Avoid TRL GRPOConfig mutually-exclusive generation schedule args.
+
+    TRL raises if both `generation_batch_size` and `steps_per_generation` are set.
+    Prefer `generation_batch_size` because it directly controls smoke/full training
+    generation memory, and drop `steps_per_generation` when both are configured.
+    """
+    cleaned = dict(kwargs)
+    generation_batch_size = cleaned.get("generation_batch_size")
+    steps_per_generation = cleaned.get("steps_per_generation")
+    if generation_batch_size is not None and steps_per_generation is not None:
+        cleaned.pop("steps_per_generation", None)
+        if logger is not None:
+            logger.warning(
+                "Both generation_batch_size=%s and steps_per_generation=%s were configured; "
+                "dropping steps_per_generation to satisfy TRL GRPOConfig.",
+                generation_batch_size,
+                steps_per_generation,
+            )
+    return cleaned

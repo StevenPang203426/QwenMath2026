@@ -8,11 +8,12 @@ GRPO 五维奖励函数模块
   4. 长度正则奖励 (-0.3 ~  0.0)  过短 -0.3，过长 -0.2，合理 0.0
   5. 无 LaTeX 奖励(-0.3 ~  0.0)  含 LaTeX -0.3，否则 0.0
 
-理论总分范围：-1.4 ~ +2.15
+默认 `legacy` 策略保持旧行为以复现实验；`strict`/`balanced` 用于
+下一轮 CoT GRPO reward 修复实验，强化 <answer> 约束并降低逻辑词权重。
 """
 import math
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from src.data.answer_extractor import extract_answer
 from src.utils.metrics import normalize_number
@@ -22,6 +23,7 @@ from src.utils.metrics import normalize_number
 # ============================================================
 
 _LATEX_PATTERN = re.compile(r'\\[a-zA-Z]')
+_ANSWER_TAG_PATTERN = re.compile(r'<answer>\s*(.*?)\s*</answer>', re.DOTALL | re.IGNORECASE)
 
 # 精度要求关键词
 _PRECISION_PATTERN = re.compile(r'保留|精确到')
@@ -33,6 +35,8 @@ _LOGIC_STRUCT = {"首先", "已知", "题意", "设", "因为", "由于", "根�
 # 长度阈值（基于 train_cot_raw 统计：正样本 p10=48, median=79, p90=145）
 _LEN_TOO_SHORT = 30    # 低于正样本 min(21) 附近
 _LEN_TOO_LONG = 300    # 高于正样本 p90(145) + 充足余量
+
+REWARD_VARIANTS = {"legacy", "strict", "balanced"}
 
 
 def _extract_text(completion) -> str:
@@ -68,6 +72,67 @@ def _round_match(pred_str: str, gold_str: str) -> bool:
     min_dp = min(pred_dp, gold_dp)
 
     return round(pred_val, min_dp) == round(gold_val, min_dp)
+
+
+def _extract_answer_tag(text: str) -> Optional[str]:
+    match = _ANSWER_TAG_PATTERN.search(text or "")
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _has_answer_tag(text: str) -> bool:
+    return _extract_answer_tag(text) is not None
+
+
+def _has_think_tag(text: str) -> bool:
+    lowered = (text or "").lower()
+    return "<think>" in lowered and "</think>" in lowered
+
+
+def _prompt_text_at(prompt: Any, index: int) -> str:
+    if prompt is None:
+        return ""
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list):
+        if prompt and all(isinstance(item, dict) for item in prompt):
+            for msg in prompt:
+                if msg.get("role") == "user":
+                    return str(msg.get("content", ""))
+            return ""
+        if index < len(prompt):
+            item = prompt[index]
+            if isinstance(item, str):
+                return item
+            if isinstance(item, list):
+                return _prompt_text_at(item, 0)
+            if isinstance(item, dict):
+                return str(item.get("content", ""))
+    return str(prompt)
+
+
+def _score_prediction(
+    predicted: str,
+    gold: Any,
+    question: str,
+    exact_reward: float,
+    round_reward: float,
+    wrong_penalty: float,
+) -> float:
+    pred_norm = normalize_number(predicted)
+    gold_norm = normalize_number(str(gold))
+
+    if pred_norm is None or gold_norm is None:
+        return wrong_penalty
+
+    if pred_norm == gold_norm:
+        return exact_reward
+
+    has_precision_req = bool(_PRECISION_PATTERN.search(question or ""))
+    if not has_precision_req and _round_match(pred_norm, gold_norm):
+        return round_reward
+    return wrong_penalty
 
 
 # ============================================================
@@ -227,21 +292,130 @@ def no_latex_reward_fn(completions, **kwargs):
 
 
 # ============================================================
+# Reward 修复策略（供下一轮 CoT GRPO smoke/full retrain 使用）
+# ============================================================
+
+def _resolve_reward_variant(config: Any = None, variant: str | None = None) -> str:
+    if variant:
+        resolved = variant
+    else:
+        reward_cfg = getattr(config, "reward", None) if config is not None else None
+        grpo_cfg = getattr(config, "grpo", None) if config is not None else None
+        resolved = (
+            getattr(reward_cfg, "cot_variant", None)
+            or getattr(reward_cfg, "variant", None)
+            or getattr(grpo_cfg, "reward_variant", None)
+            or "legacy"
+        )
+    resolved = str(resolved).strip().lower()
+    if resolved not in REWARD_VARIANTS:
+        raise ValueError(f"Unknown CoT reward variant: {resolved}; available={sorted(REWARD_VARIANTS)}")
+    return resolved
+
+
+def _make_repaired_correctness_reward_fn(variant: str):
+    def repaired_correctness_reward_fn(completions, answer=None, prompt=None, **kwargs):
+        rewards = []
+        for i, comp in enumerate(completions):
+            text = _extract_text(comp)
+            gold = answer[i] if answer else None
+            if gold is None:
+                rewards.append(0.0)
+                continue
+
+            tag_answer = _extract_answer_tag(text)
+            question = _prompt_text_at(prompt, i)
+            if tag_answer is not None:
+                rewards.append(_score_prediction(
+                    predicted=tag_answer,
+                    gold=gold,
+                    question=question,
+                    exact_reward=1.0,
+                    round_reward=0.3,
+                    wrong_penalty=-0.5,
+                ))
+                continue
+
+            if variant == "strict":
+                rewards.append(-0.6)
+                continue
+
+            fallback = extract_answer(text)
+            rewards.append(_score_prediction(
+                predicted=fallback,
+                gold=gold,
+                question=question,
+                exact_reward=0.35,
+                round_reward=0.1,
+                wrong_penalty=-0.5,
+            ))
+        return rewards
+
+    repaired_correctness_reward_fn.__name__ = f"cot_{variant}_correctness_reward_fn"
+    return repaired_correctness_reward_fn
+
+
+def _make_repaired_format_reward_fn(variant: str):
+    def repaired_format_reward_fn(completions, **kwargs):
+        rewards = []
+        for comp in completions:
+            text = _extract_text(comp)
+            has_answer = _has_answer_tag(text)
+            has_think = _has_think_tag(text)
+            if has_answer and has_think:
+                rewards.append(0.2)
+            elif has_answer:
+                rewards.append(0.0 if variant == "strict" else 0.1)
+            else:
+                rewards.append(-0.4 if variant == "strict" else -0.3)
+        return rewards
+
+    repaired_format_reward_fn.__name__ = f"cot_{variant}_format_reward_fn"
+    return repaired_format_reward_fn
+
+
+def repaired_logic_word_reward_fn(completions, **kwargs):
+    """低权重逻辑词奖励：只作为 CoT 风格辅助信号，最高不超过 correctness 的 20%。"""
+    rewards = []
+    for comp in completions:
+        text = _extract_text(comp)
+        basic_hits = sum(1 for w in _LOGIC_BASIC if w in text)
+        struct_hits = sum(1 for w in _LOGIC_STRUCT if w in text)
+        total_hits = basic_hits + struct_hits
+        if total_hits == 0:
+            rewards.append(-0.05)
+        else:
+            rewards.append(min(0.15, basic_hits * 0.015 + struct_hits * 0.025))
+    return rewards
+
+
+# ============================================================
 # 构建奖励函数列表（供 GRPOTrainer 使用）
 # ============================================================
 
-def build_reward_funcs():
+def build_reward_funcs(config: Any = None, variant: str | None = None):
     """
-    返回 5 个独立奖励函数列表
+    返回 5 个独立奖励函数列表。
 
+    `legacy` 保持旧实验行为；`strict`/`balanced` 用于 reward 修复实验。
     TRL GRPOTrainer 会自动求和，并在日志中分别记录每个维度的均值。
     """
+    resolved_variant = _resolve_reward_variant(config=config, variant=variant)
+    if resolved_variant == "legacy":
+        return [
+            correctness_reward_fn,   # R1: 正确性   -0.5 ~ +1.0
+            format_reward_fn,        # R2: 格式标签  0.0 ~ +0.2
+            logic_word_reward_fn,    # R3: 逻辑词   -0.3 ~ +0.95
+            length_reward_fn,        # R4: 长度正则  -0.3 ~  0.0
+            no_latex_reward_fn,      # R5: 无LaTeX  -0.3 ~  0.0
+        ]
+
     return [
-        correctness_reward_fn,   # R1: 正确性   -0.5 ~ +1.0
-        format_reward_fn,        # R2: 格式标签  0.0 ~ +0.2
-        logic_word_reward_fn,    # R3: 逻辑词   -0.3 ~ +0.95
-        length_reward_fn,        # R4: 长度正则  -0.3 ~  0.0
-        no_latex_reward_fn,      # R5: 无LaTeX  -0.3 ~  0.0
+        _make_repaired_correctness_reward_fn(resolved_variant),
+        _make_repaired_format_reward_fn(resolved_variant),
+        repaired_logic_word_reward_fn,
+        length_reward_fn,
+        no_latex_reward_fn,
     ]
 
 

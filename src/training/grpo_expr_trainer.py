@@ -12,6 +12,7 @@ from src.models.model_loader import load_model_and_tokenizer, apply_lora
 from src.models.reward_expr import build_expr_reward_funcs
 from src.training.rl_utils import (
     add_tokenizer_kwarg,
+    drop_conflicting_grpo_generation_args,
     filter_supported_kwargs,
     render_chat_prompt,
     to_text,
@@ -140,6 +141,7 @@ def train_grpo_expr(config_path: str) -> None:
         "dataloader_num_workers": getattr(config.training, "dataloader_num_workers", 0),
         "max_grad_norm": getattr(config.training, "max_grad_norm", 1.0),
     }
+    grpo_kwargs = drop_conflicting_grpo_generation_args(grpo_kwargs, logger)
     grpo_config = GRPOConfig(**filter_supported_kwargs(GRPOConfig, grpo_kwargs))
 
     # GRPO Trainer

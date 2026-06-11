@@ -1,0 +1,35 @@
+# ============================================================
+# CoT GRPO reward 修复 smoke: balanced
+# 从 sft_cot/best 开始，小步数验证温和兜底策略是否兼顾格式与正确性。
+# ============================================================
+inherit: grpo
+
+reward:
+  variant: "balanced"
+
+training:
+  output_dir: "outputs/checkpoints/grpo_cot_reward_balanced_smoke"
+  max_steps: 50
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 1
+  learning_rate: 5.0e-6
+  logging_steps: 1
+  save_steps: 25
+  save_total_limit: 2
+  max_grad_norm: 0.1
+
+grpo:
+  num_generations: 4
+  max_completion_length: 256
+  max_prompt_length: 256
+  temperature: 0.8
+  top_p: 0.95
+  use_vllm: true
+  vllm_mode: "colocate"
+  vllm_gpu_memory_utilization: 0.3
+  generation_batch_size: 4
+
+logging:
+  run_name: "grpo-cot-reward-balanced-smoke"
+  tags: ["grpo", "cot", "reward-balanced", "smoke"]

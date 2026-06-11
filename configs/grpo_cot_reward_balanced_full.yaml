@@ -1,0 +1,21 @@
+# ============================================================
+# CoT GRPO reward 修复 full: balanced
+# Smoke 结果优于 strict：direct 0.7358 (844/1147), missing answer tag 15。
+# 从 sft_cot/best 开始全量训练，输出到独立 checkpoint，不覆盖旧 GRPO。
+# ============================================================
+inherit: grpo
+
+reward:
+  variant: "balanced"
+
+training:
+  output_dir: "outputs/checkpoints/grpo_cot_reward_balanced_full"
+  num_train_epochs: 1
+  learning_rate: 5.0e-6
+  save_steps: 100
+  save_total_limit: 3
+  max_grad_norm: 0.1
+
+logging:
+  run_name: "grpo-cot-reward-balanced-full"
+  tags: ["grpo", "cot", "reward-balanced", "full"]
