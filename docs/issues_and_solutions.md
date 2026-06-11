@@ -584,6 +584,147 @@ bash scripts/run_expr_data_build.sh export_failed
 
 ---
 
+## 37. Fixed-base CoT ablation 结果与重训决策
+
+**背景：** 修复 DPO/GRPO 评测基座后，重新在 `outputs/evaluation/cot_prompt_ablation_fixed_base` 跑 validation ablation。该实验保持 checkpoint 不变，只比较 inference prompt，并且 DPO/GRPO 均使用训练时对应的 `SFT-merged base + adapter`。
+
+**验证准确率：**
+
+| Model | 最佳 Prompt | Accuracy | Missing answer tag | 结论 |
+|---|---|---:|---:|---|
+| `sft_cot` | `direct` | 0.7376 | 16 | 当前最强单模型，应作为 CoT 主模型 |
+| `grpo` | `zero_shot_cot` | 0.6347 | 185 | 比错误加载版显著恢复，但仍明显低于 SFT |
+| `grpo` | `few_shot_cot` | 0.6312 | 5 | 格式几乎恢复，但准确率仍低，说明主要问题转为推理能力退化 |
+| `dpo` | `few_shot_cot` | 0.4333 | 93 | few-shot 能修复大量格式，但推理质量仍不可作为主模型 |
+
+**关键观察：**
+- 修复基座加载是有效的：`dpo few_shot_cot` 从约 0.2075 提升到 0.4333，`grpo few_shot_cot` 从约 0.5092 提升到 0.6312。
+- few-shot 不是通用收益：`sft_cot direct` 为 0.7376，而 `sft_cot few_shot_cot` 降到 0.7027，说明 SFT 更适合短 direct prompt。
+- DPO 的 few-shot 增益主要来自格式/行为修复，而不是推理能力恢复；有标签样本仍大量算错。
+- GRPO few-shot 的 missing tag 只有 5/1147，但准确率仍低于 SFT direct 约 10.6 个百分点，说明剩余问题主要是二阶段训练损伤求解能力，而不是答案抽取格式。
+
+**互补性：**
+- `sft_cot:direct + grpo:zero_shot_cot` oracle accuracy 为 0.7969。
+- `sft_cot:direct + grpo:few_shot_cot` oracle accuracy 为 0.7986。
+- `sft_cot:direct + dpo:few_shot_cot + grpo:zero_shot_cot` oracle accuracy 为 0.8221。
+
+这说明 DPO/GRPO 仍有少量互补样本，可以作为投票候选，但不能作为主模型。
+
+**当前使用建议：**
+- 单模型提交优先使用 `sft_cot` + `direct`。
+- Ensemble 中以 `sft_cot:direct` 为主权重，`grpo:zero_shot_cot` 或 `grpo:few_shot_cot` 作为辅助候选。
+- `dpo:few_shot_cot` 权重应很低，或先不进入最终投票。
+
+**重训决策：**
+- 不需要重训 SFT。
+- GRPO 触发后续重训门槛：即使格式恢复，准确率仍低于 SFT direct 超过 2 个百分点。下一步应先调整 CoT GRPO reward，再从 `sft_cot` 重新训练 GRPO。
+- DPO 不建议立刻重训；应先审计 `train_dpo.json`、DPO loss、学习率、响应截断和 pair 质量，再决定是否重训。
+
+**GRPO reward 后续方向：**
+- 提高正确性奖励相对权重。
+- 对缺失 `<answer>` 增加负惩罚。
+- 正确性 reward 优先或只信任 `<answer>` 内答案，避免无标签文本靠兜底抽取拿高分。
+- 降低逻辑词奖励权重，避免模型学会“像在推理”但不真正算对。
+
+---
+
+## 38. CoT 修复实验基础设施（SFT 主线 + GRPO reward smoke + DPO 审计）
+
+**目标：** 固化当前可用 CoT 主线，同时为下一轮 GRPO reward 重训和 DPO 审计提供可复现入口。本轮不重训 SFT，不直接替换主模型。
+
+**当前固化策略：**
+- 单模型：`sft_cot:direct`，fixed-base validation accuracy = 0.7376。
+- 离线 ensemble 初始权重：`sft_cot:direct=1.0`，`grpo:zero_shot_cot=0.35`，`grpo:few_shot_cot=0.30`，`dpo:few_shot_cot=0.0`。
+- 验收门槛：离线 weighted vote 不能低于 `sft_cot:direct` 的 0.7376；若低于，当前提交只使用 `sft_cot:direct`。
+
+**已实现工具：**
+- `src/analysis/cot_ensemble_offline.py`：读取 `cot_prompt_ablation_fixed_base` 的 details 文件，做 prompt-specific weighted vote，输出 `ensemble_report.json`、`ensemble_summary.md`、`ensemble_predictions.csv`。
+- `src/models/reward.py`：保留 `legacy` reward，同时新增 `strict` 与 `balanced` 两套 CoT GRPO reward variant。`strict` 只信任 `<answer>` 内答案；`balanced` 允许无标签兜底但降级给分；两者都对缺 `<answer>` 给负惩罚，并把逻辑词奖励上限降到 0.15。
+- `src/training/grpo_trainer.py`：支持从配置读取 reward variant，并补齐 `training.max_steps`，用于小步数 smoke。
+- `configs/grpo_cot_reward_strict_smoke.yaml` 与 `configs/grpo_cot_reward_balanced_smoke.yaml`：从 `outputs/checkpoints/sft_cot/best` 开始训练，输出到独立 smoke checkpoint，不覆盖 `outputs/checkpoints/grpo`。
+- `src/analysis/dpo_audit.py`：审计 DPO pair 质量、token 截断风险、`trainer_state.json` loss/learning-rate/margin 曲线，并生成中间 checkpoint validation 命令。
+- `cot_prompt_ablation.py`：新增 `--sft_adapter_path`、`--dpo_adapter_path`、`--grpo_adapter_path`，便于对 DPO/GRPO 中间 checkpoint 跑 fixed-base validation。
+
+**运行命令：**
+```bash
+bash scripts/run_cot_offline_ensemble.sh
+bash scripts/run_grpo_cot_reward_smoke.sh strict
+bash scripts/run_grpo_cot_reward_smoke.sh balanced
+bash scripts/run_dpo_audit.sh
+```
+
+**Smoke 后全量训练命令：**
+```bash
+bash scripts/run_grpo_cot_reward_full.sh
+```
+
+**全量训练后验证命令：**
+```bash
+OUTPUT_DIR=outputs/evaluation/grpo_cot_reward_balanced_full \
+MODELS=grpo PROMPTS=direct,zero_shot_cot,few_shot_cot \
+bash scripts/run_cot_prompt_ablation.sh val \
+  --grpo_adapter_path outputs/checkpoints/grpo_cot_reward_balanced_full/best
+```
+
+**GRPO smoke 选择门槛：**
+- validation accuracy 必须高于当前最佳 GRPO `grpo:zero_shot_cot = 0.6347`。
+- missing answer tag 必须 <= 5%。
+- 两版都过关时，选 validation accuracy 更高者；若相差小于 1 个百分点，选 missing tag 更低者。
+
+**Smoke 结果（2026-06-11）：**
+
+| Reward variant | 最佳 Prompt | Accuracy | Correct / Total | Missing answer tag | 决策 |
+|---|---|---:|---:|---:|---|
+| `balanced` | `direct` | 0.7358 | 844 / 1147 | 15 | 胜出，进入全量训练 |
+| `strict` | `direct` | 0.7350 | 843 / 1147 | 17 | 通过门槛，但低于 balanced |
+
+两版均超过旧 GRPO 最佳 0.6347，且 missing tag 均低于 5%。`balanced:direct` 比 `strict:direct` 多对 1 题，missing tag 少 2 条，因此选择 `balanced` 做全量 GRPO。few-shot prompt 在两版上都低于 direct，后续评测/提交以 `direct` 为主。
+
+**全量 GRPO 替换门槛：** 新 GRPO 必须达到或超过 `sft_cot:direct = 0.7376`，且 missing answer tag <= 5%。未达标则不替换主模型，只保留实验记录。
+
+**DPO 后续门槛：** 先审计 pair、截断、loss 和中间 checkpoint。只有当某个中间 checkpoint 明显接近或超过当前 `dpo:few_shot_cot = 0.4333` 且格式稳定时，才考虑 DPO 重训；若发现长尾/截断严重，先清洗 pair 并降低学习率后再设计重训。
+
+---
+
+## 39. GRPO smoke 配置同时设置互斥 generation 参数
+
+**现象：** 运行 `bash scripts/run_grpo_cot_reward_smoke.sh all` 时，strict/balanced 都在创建 `GRPOConfig` 阶段报错：`'generation_batch_size' and 'steps_per_generation' can not be both configured at the same time`。
+
+**原因：** TRL 的 `GRPOConfig` 将 `generation_batch_size` 和 `steps_per_generation` 视为互斥参数。本轮 smoke 配置同时写了两者，trainer 又原样传入，导致训练还未开始就失败。日志中的 `warmup_ratio` 是 deprecation warning，不是本次 fatal error。
+
+**解决：**
+- smoke 配置只保留 `generation_batch_size`，删除 `steps_per_generation`，优先控制 generation 显存与批大小。
+- `src/training/rl_utils.py` 新增 `drop_conflicting_grpo_generation_args()`，当后续配置再次同时设置两者时，自动保留 `generation_batch_size` 并丢弃 `steps_per_generation`。
+- CoT GRPO trainer 与表达式 GRPO trainer 都接入该 helper，避免同类问题扩散。
+
+---
+
+## 40. Balanced full GRPO 低于 smoke 且未达替换门槛
+
+**现象：** `balanced` reward smoke 表现接近 SFT 主线，但按 `configs/grpo_cot_reward_balanced_full.yaml` 全量训练后，fixed-base validation ablation 下降明显：
+
+| Prompt | Accuracy | Correct / Total | Missing answer tag | 结论 |
+|---|---:|---:|---:|---|
+| `direct` | 0.6922 | 794 / 1147 | 165 | 格式退化明显，不可用作主模型 |
+| `zero_shot_cot` | 0.7010 | 804 / 1147 | 49 | 全量 checkpoint 最佳 prompt，但仍低于 SFT 主线 |
+| `few_shot_cot` | 0.6888 | 790 / 1147 | 3 | 格式稳定但准确率最低 |
+
+**对比门槛：**
+- 旧 GRPO smoke 进入全量门槛：高于 0.6347 且 missing tag <= 5%。该 full checkpoint 的 `zero_shot_cot` 仍满足这个低门槛。
+- 主模型替换门槛：达到或超过 `sft_cot:direct = 0.7376` 且 missing tag <= 5%。该 full checkpoint 最佳只有 0.7010，未达标。
+
+**原因判断：** smoke 的高分没有在全量训练中保持，说明继续训练一整个 epoch 可能引入策略退化/过训练；同时 `direct` missing tag 从 smoke 的 15 上升到 165，说明格式约束在全量训练中仍不稳定。few-shot 能把 missing tag 压到 3，但没有恢复准确率，问题不只是标签格式。
+
+**训练耗时问题：** full 配置未设置 `training.max_steps`，继承 `num_train_epochs: 1` 后会跑完整训练集。实际进度显示约 `5999` step，`1.87s/it` 时 ETA 约 3 小时，作为快速实验偏慢。
+
+**决策：**
+- 不替换当前主模型，当前单模型仍使用 `sft_cot:direct`。
+- 不把该 full GRPO 提升为高权重投票候选；如需使用，只能低权重或仅做错误分析。
+- 下一轮不要直接跑完整 1 epoch，应先用 staged full / capped full，例如设置 `max_steps` 做 800、1500、3000 step checkpoint sweep，再按 fixed-base validation 选择最佳 checkpoint。
+- 继续优化 GRPO reward 时，应重点防止 full training 后的 `<answer>` 格式退化，并观察 direct/zero-shot/few-shot 三种 prompt 的分叉。
+
+---
+
 ## 待解决 / 后续计划
 
 | 编号 | 事项 | 状态 |

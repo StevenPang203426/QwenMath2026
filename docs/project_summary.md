@@ -60,7 +60,32 @@
 
 关键设计：四舍五入等价判断（`_round_match`）、逻辑词按种类数计分防刷词、数据驱动的长度阈值。
 
-### 3.2 GRPO 训练加速
+### 3.2 Fixed-base CoT 消融结论（2026-06-11）
+
+修复 DPO/GRPO 推理时的 SFT-merged base 加载后，二阶段模型比错误加载版明显恢复，但当前最强单模型仍是 `sft_cot:direct`。
+
+| 模型/Prompt | Validation Accuracy | Missing answer tag | 当前定位 |
+|---|---:|---:|---|
+| `sft_cot:direct` | 0.7376 | 16 | CoT 单模型首选 |
+| `grpo:zero_shot_cot` | 0.6347 | 185 | 可作为投票辅助 |
+| `grpo:few_shot_cot` | 0.6312 | 5 | 格式稳定但准确率不足 |
+| `dpo:few_shot_cot` | 0.4333 | 93 | 暂不作为主投票模型 |
+
+当前结论：不重训 SFT；GRPO 需要先调整 reward 后再考虑从 `sft_cot` 重训；DPO 先审计数据与训练日志，再决定是否重训。投票阶段应以 `sft_cot:direct` 为主权重，GRPO 仅作为互补候选。
+
+### 3.2.1 CoT 修复实验计划与工具（2026-06-11）
+
+当前提交策略先不替换 CoT 主模型：单模型继续使用 `sft_cot:direct`；prompt-specific ensemble 先通过离线脚本验证，推荐初始权重为 `sft_cot:direct=1.0`、`grpo:zero_shot_cot=0.35`、`grpo:few_shot_cot=0.30`、`dpo:few_shot_cot=0.0`。如果离线 weighted vote 低于 0.7376，则当前提交只保留 `sft_cot:direct`。
+
+GRPO 下一步采用 strict/balanced 双 reward smoke：两版都从 `sft_cot/best` 开始，写入独立 checkpoint；通过 `training.max_steps` 做小步数筛选。成功进入全量训练的门槛是 validation accuracy 超过旧 GRPO 0.6347 且 missing answer tag <= 5%；最终替换门槛是达到或超过 `sft_cot:direct = 0.7376` 且 missing answer tag <= 5%。DPO 只做 pair、截断、loss 和中间 checkpoint 审计，不进入本轮重训。
+
+Smoke 结果已完成：`balanced:direct` 达到 0.7358（844/1147，missing tag 15），`strict:direct` 达到 0.7350（843/1147，missing tag 17）。两版均通过 smoke 门槛，balanced 更高且格式更稳，因此进入全量 GRPO。
+
+Balanced full 结果没有保持 smoke 收益：最佳为 `zero_shot_cot = 0.7010`（804/1147，missing tag 49），`direct = 0.6922` 且 missing tag 165，`few_shot_cot = 0.6888`。因此 full checkpoint 未达到 `sft_cot:direct = 0.7376` 的替换门槛，当前主模型仍固定为 `sft_cot:direct`。下一轮 GRPO 不应直接跑完整 1 epoch，应采用 capped/staged full（例如 max_steps checkpoint sweep）来避免过训练和格式退化。
+
+新增入口：`scripts/run_cot_offline_ensemble.sh`、`scripts/run_grpo_cot_reward_smoke.sh`、`scripts/run_dpo_audit.sh`、`scripts/run_grpo_cot_reward_full.sh`。全量训练配置为 `configs/grpo_cot_reward_balanced_full.yaml`，输出到 `outputs/checkpoints/grpo_cot_reward_balanced_full`，不会覆盖旧 GRPO checkpoint。
+
+### 3.3 GRPO 训练加速
 
 **文件：** `configs/grpo.yaml`，`src/training/grpo_trainer.py`
 
@@ -75,7 +100,7 @@
 
 预计训练时间从 82 小时降至 2-5 小时。
 
-### 3.3 答案后处理规则引擎（P0）
+### 3.4 答案后处理规则引擎（P0）
 
 **文件：** `src/inference/answer_postprocessor.py`
 
@@ -94,7 +119,7 @@
 
 测试集覆盖：8000 题中 612 题（7.7%）有明确格式约束。
 
-### 3.4 题目类型分类器 + 自适应 Prompt（P2）
+### 3.5 题目类型分类器 + 自适应 Prompt（P2）
 
 **文件：** `src/inference/question_classifier.py`
 
@@ -104,13 +129,13 @@
 基础 prompt + 【格式约束】答案写成百分数形式，如25%。
 ```
 
-### 3.5 多路推理投票融合（P1）
+### 3.6 多路推理投票融合（P1）
 
 **文件：** `src/inference/ensemble_infer.py`
 
 同模型多温度采样（5 次）+ 多 checkpoint 投票，本地 majority vote。不使用外部 API（竞赛不允许）。
 
-### 3.6 表达式方案（完整新路线）
+### 3.7 表达式方案（完整新路线）
 
 **设计文档：** `docs/expr_plan.md`
 
