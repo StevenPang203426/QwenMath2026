@@ -60,10 +60,19 @@ data/splits/*.json
 !outputs/submissions/.gitkeep
 !outputs/logs/.gitkeep
 
-# 提交结果
-outputs/submissions/*.csv
+# Generated outputs stay local; keep only lightweight indexes/placeholders.
+outputs/checkpoints/
+outputs/logs/
+outputs/evaluation/**
+!outputs/evaluation/
+!outputs/evaluation/INDEX.md
+outputs/submissions/*
+!outputs/submissions/
+!outputs/submissions/.gitkeep
+!outputs/submissions/README.md
 
-# docs
-
-docs/
-outputs/
+# Documentation and formal report assets are tracked intentionally.
+!docs/
+!docs/**
+!report/
+!report/**
