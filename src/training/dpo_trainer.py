@@ -7,18 +7,21 @@ import logging
 from datasets import Dataset
 from transformers import AutoTokenizer
 from trl import DPOConfig, DPOTrainer
-from peft import PeftModel
-
-from src.models.model_loader import load_model_and_tokenizer, apply_lora
 from src.training.rl_utils import (
     add_tokenizer_kwarg,
     filter_supported_kwargs,
     render_chat_prompt,
     to_text,
 )
+from src.training.runtime import (
+    apply_lora_from_config,
+    finish_training_run,
+    load_base_model,
+    merge_adapter_if_present,
+    save_best_checkpoint,
+    start_training_run,
+)
 from src.utils.config import load_config
-from src.utils.seed import set_seed
-from src.utils.logger import setup_wandb, finish_wandb
 
 logger = logging.getLogger("math_solver.dpo_trainer")
 
@@ -67,59 +70,19 @@ def train_dpo(config_path: str) -> None:
         config_path: 配置文件路径
     """
     config = load_config(config_path)
-    set_seed(config.training.seed)
-
-    # 初始化 wandb
-    setup_wandb(
-        project=config.logging.project,
-        run_name=getattr(config.logging, "run_name", "dpo"),
-        config=config.to_dict(),
-        tags=getattr(config.logging, "tags", ["dpo"]),
-    )
+    start_training_run(config, default_run_name="dpo", default_tags=["dpo"])
 
     # 加载 SFT checkpoint 作为起点
     sft_checkpoint = getattr(config.model, "sft_checkpoint", None)
-    if sft_checkpoint:
-        logger.info(f"从 SFT checkpoint 加载: {sft_checkpoint}")
-        model, tokenizer = load_model_and_tokenizer(
-            model_name=config.model.name,
-            cache_dir=config.model.cache_dir,
-            torch_dtype=config.model.torch_dtype,
-        )
-        model = PeftModel.from_pretrained(model, model_id=sft_checkpoint)
-        model = model.merge_and_unload()
-        # 重新应用 LoRA 用于 DPO 训练
-        model = apply_lora(
-            model,
-            r=config.lora.r,
-            lora_alpha=config.lora.lora_alpha,
-            lora_dropout=config.lora.lora_dropout,
-            target_modules=config.lora.target_modules,
-        )
-    else:
+    if not sft_checkpoint:
         logger.info("无 SFT checkpoint，从基础模型开始 DPO")
-        model, tokenizer = load_model_and_tokenizer(
-            model_name=config.model.name,
-            cache_dir=config.model.cache_dir,
-            torch_dtype=config.model.torch_dtype,
-        )
-        model = apply_lora(
-            model,
-            r=config.lora.r,
-            lora_alpha=config.lora.lora_alpha,
-            lora_dropout=config.lora.lora_dropout,
-            target_modules=config.lora.target_modules,
-        )
+    model, tokenizer = load_base_model(config)
+    model = merge_adapter_if_present(model, sft_checkpoint, "SFT checkpoint")
+    model = apply_lora_from_config(model, config)
 
     # 加载 ref model (DPO 需要)
-    ref_model, _ = load_model_and_tokenizer(
-        model_name=config.model.name,
-        cache_dir=config.model.cache_dir,
-        torch_dtype=config.model.torch_dtype,
-    )
-    if sft_checkpoint:
-        ref_model = PeftModel.from_pretrained(ref_model, model_id=sft_checkpoint)
-        ref_model = ref_model.merge_and_unload()
+    ref_model, _ = load_base_model(config)
+    ref_model = merge_adapter_if_present(ref_model, sft_checkpoint, "reference SFT checkpoint")
 
     # 加载数据
     train_dataset = _load_dpo_dataset(config.data.train_path, tokenizer)
@@ -166,12 +129,9 @@ def train_dpo(config_path: str) -> None:
     trainer.train()
 
     # 保存
-    best_dir = f"{config.training.output_dir}/best"
-    trainer.save_model(best_dir)
-    tokenizer.save_pretrained(best_dir)
-    logger.info(f"DPO 模型已保存至: {best_dir}")
+    save_best_checkpoint(trainer, tokenizer, config.training.output_dir, "DPO 模型")
 
-    finish_wandb()
+    finish_training_run()
 
 
 if __name__ == "__main__":
@@ -179,7 +139,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     if len(sys.argv) < 3 or sys.argv[1] != "--config":
-        print("用法: python -m src.training.dpo_trainer --config configs/dpo.yaml")
+        print("用法: python -m src.training.dpo_trainer --config configs/cot/dpo.yaml")
         sys.exit(1)
 
     train_dpo(sys.argv[2])

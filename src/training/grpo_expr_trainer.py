@@ -5,10 +5,8 @@
 import json
 import logging
 from datasets import Dataset
-from peft import PeftModel
 from trl import GRPOConfig, GRPOTrainer
 
-from src.models.model_loader import load_model_and_tokenizer, apply_lora
 from src.models.reward_expr import build_expr_reward_funcs
 from src.training.rl_utils import (
     add_tokenizer_kwarg,
@@ -18,8 +16,14 @@ from src.training.rl_utils import (
     to_text,
 )
 from src.utils.config import load_config
-from src.utils.seed import set_seed
-from src.utils.logger import setup_wandb, finish_wandb
+from src.training.runtime import (
+    apply_lora_from_config,
+    finish_training_run,
+    load_base_model,
+    merge_adapter_if_present,
+    save_best_checkpoint,
+    start_training_run,
+)
 
 logger = logging.getLogger("math_solver.grpo_expr_trainer")
 
@@ -61,36 +65,14 @@ def _build_expr_grpo_dataset(data_path: str, tokenizer) -> Dataset:
 def train_grpo_expr(config_path: str) -> None:
     """执行表达式 GRPO 训练"""
     config = load_config(config_path)
-    set_seed(config.training.seed)
-
-    setup_wandb(
-        project=config.logging.project,
-        run_name=getattr(config.logging, "run_name", "grpo-expr"),
-        config=config.to_dict(),
-        tags=getattr(config.logging, "tags", ["grpo", "expression"]),
-    )
+    start_training_run(config, default_run_name="grpo-expr", default_tags=["grpo", "expression"])
 
     # 加载模型（从表达式 SFT checkpoint 开始）
     sft_checkpoint = getattr(config.model, "sft_checkpoint", None)
 
-    model, tokenizer = load_model_and_tokenizer(
-        model_name=config.model.name,
-        cache_dir=config.model.cache_dir,
-        torch_dtype=config.model.torch_dtype,
-    )
-
-    if sft_checkpoint:
-        logger.info(f"从表达式 SFT checkpoint 加载: {sft_checkpoint}")
-        model = PeftModel.from_pretrained(model, model_id=sft_checkpoint)
-        model = model.merge_and_unload()
-
-    model = apply_lora(
-        model,
-        r=config.lora.r,
-        lora_alpha=config.lora.lora_alpha,
-        lora_dropout=config.lora.lora_dropout,
-        target_modules=config.lora.target_modules,
-    )
+    model, tokenizer = load_base_model(config)
+    model = merge_adapter_if_present(model, sft_checkpoint, "表达式 SFT checkpoint")
+    model = apply_lora_from_config(model, config)
 
     # 加载数据
     train_dataset = _build_expr_grpo_dataset(config.data.train_path, tokenizer)
@@ -161,12 +143,9 @@ def train_grpo_expr(config_path: str) -> None:
     trainer.train()
 
     # 保存
-    best_dir = f"{config.training.output_dir}/best"
-    trainer.save_model(best_dir)
-    tokenizer.save_pretrained(best_dir)
-    logger.info(f"表达式 GRPO 模型已保存至: {best_dir}")
+    save_best_checkpoint(trainer, tokenizer, config.training.output_dir, "表达式 GRPO 模型")
 
-    finish_wandb()
+    finish_training_run()
 
 
 if __name__ == "__main__":
@@ -174,7 +153,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     if len(sys.argv) < 3 or sys.argv[1] != "--config":
-        print("用法: python -m src.training.grpo_expr_trainer --config configs/grpo_expr.yaml")
+        print("用法: python -m src.training.grpo_expr_trainer --config configs/expr/grpo_expr.yaml")
         sys.exit(1)
 
     train_grpo_expr(sys.argv[2])

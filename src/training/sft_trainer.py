@@ -12,10 +12,13 @@ from transformers import (
 )
 
 from src.data.dataset import MathDataset
-from src.models.model_loader import load_model_and_tokenizer, apply_lora
-from src.utils.config import load_config, parse_args_with_config
-from src.utils.seed import set_seed
-from src.utils.logger import setup_wandb, finish_wandb
+from src.utils.config import load_config
+from src.training.runtime import (
+    finish_training_run,
+    load_lora_base_model,
+    save_best_checkpoint,
+    start_training_run,
+)
 from src.utils.metrics import compute_accuracy
 from src.data.answer_extractor import extract_answer
 from src.inference.expr_predictor import expr_predict_single
@@ -93,31 +96,10 @@ def train_sft(config_path: str) -> None:
         config_path: 配置文件路径
     """
     config = load_config(config_path)
-    set_seed(config.training.seed)
+    start_training_run(config)
 
-    # 初始化 wandb
-    setup_wandb(
-        project=config.logging.project,
-        run_name=getattr(config.logging, "run_name", None),
-        config=config.to_dict(),
-        tags=getattr(config.logging, "tags", None),
-    )
-
-    # 加载模型
-    model, tokenizer = load_model_and_tokenizer(
-        model_name=config.model.name,
-        cache_dir=config.model.cache_dir,
-        torch_dtype=config.model.torch_dtype,
-    )
-
-    # 应用 LoRA
-    model = apply_lora(
-        model,
-        r=config.lora.r,
-        lora_alpha=config.lora.lora_alpha,
-        lora_dropout=config.lora.lora_dropout,
-        target_modules=config.lora.target_modules,
-    )
+    # 加载模型并应用 LoRA
+    model, tokenizer = load_lora_base_model(config)
 
     # 判断训练目标格式
     target_format = getattr(config.data, "target_format", "auto")
@@ -199,12 +181,9 @@ def train_sft(config_path: str) -> None:
     trainer.train()
 
     # 保存最终模型
-    best_dir = f"{config.training.output_dir}/best"
-    trainer.save_model(best_dir)
-    tokenizer.save_pretrained(best_dir)
-    logger.info(f"模型已保存至: {best_dir}")
+    save_best_checkpoint(trainer, tokenizer, config.training.output_dir, "模型")
 
-    finish_wandb()
+    finish_training_run()
 
 
 if __name__ == "__main__":
@@ -212,7 +191,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     if len(sys.argv) < 3 or sys.argv[1] != "--config":
-        print("用法: python -m src.training.sft_trainer --config configs/sft_baseline.yaml")
+        print("用法: python -m src.training.sft_trainer --config configs/cot/sft_baseline.yaml")
         sys.exit(1)
 
     train_sft(sys.argv[2])
