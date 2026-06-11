@@ -94,7 +94,7 @@ def run_inference(config_path: str) -> str:
     执行批量推理并生成 submit.csv
 
     Args:
-        config_path: 推理配置文件路径（configs/infer.yaml）
+        config_path: 推理配置文件路径（configs/inference/infer.yaml）
 
     Returns:
         输出文件路径
@@ -230,5 +230,5 @@ if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO)
 
-    config_path = sys.argv[2] if len(sys.argv) > 2 else "configs/infer.yaml"
+    config_path = sys.argv[2] if len(sys.argv) > 2 else "configs/inference/infer.yaml"
     run_inference(config_path)

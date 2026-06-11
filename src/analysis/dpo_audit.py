@@ -211,7 +211,7 @@ def checkpoint_validation_commands(checkpoint_root: str | Path, output_root: str
         commands.append(
             f"OUTPUT_DIR={output_root}/{checkpoint.name} "
             "MODELS=dpo PROMPTS=few_shot_cot "
-            f"bash scripts/run_cot_prompt_ablation.sh val --dpo_adapter_path {checkpoint}"
+            f"bash scripts/evaluate.sh cot-ablation val --dpo_adapter_path {checkpoint}"
         )
     return commands
 
@@ -304,7 +304,7 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit DPO pair quality, truncation risk, and trainer_state logs")
-    parser.add_argument("--config", default="configs/dpo.yaml")
+    parser.add_argument("--config", default="configs/cot/dpo.yaml")
     parser.add_argument("--data", default="data/processed/train_dpo.json")
     parser.add_argument("--reference_data", default="data/raw/train.json")
     parser.add_argument("--checkpoint_root", default="outputs/checkpoints/dpo")

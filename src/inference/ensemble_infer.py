@@ -341,5 +341,5 @@ if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO)
 
-    config_path = sys.argv[2] if len(sys.argv) > 2 else "configs/infer_ensemble.yaml"
+    config_path = sys.argv[2] if len(sys.argv) > 2 else "configs/inference/infer_ensemble.yaml"
     run_ensemble_inference(config_path)

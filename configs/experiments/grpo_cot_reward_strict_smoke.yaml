@@ -2,7 +2,7 @@
 # CoT GRPO reward 修复 smoke: strict
 # 从 sft_cot/best 开始，小步数验证严格 <answer> 约束是否改善格式与准确率。
 # ============================================================
-inherit: grpo
+inherit: ../cot/grpo
 
 reward:
   variant: "strict"

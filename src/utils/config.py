@@ -2,7 +2,6 @@
 配置加载模块
 支持 YAML 继承（inherit 字段）和命令行覆盖
 """
-import os
 import copy
 import yaml
 import argparse
@@ -49,22 +48,41 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _candidate_inherit_names(parent_name: str) -> list[str]:
+    parent_path = Path(parent_name)
+    if parent_path.suffix:
+        return [str(parent_path)]
+    return [f"{parent_name}.yaml"]
+
+
+def _find_inherit_path(parent_name: str, config_dir: str) -> Path:
+    """Find an inherited config from the current config directory upward."""
+    current = Path(config_dir).resolve()
+    names = _candidate_inherit_names(parent_name)
+
+    for base_dir in [current, *current.parents]:
+        for name in names:
+            candidate = base_dir / name
+            if candidate.exists():
+                return candidate
+
+    tried = ", ".join(str(Path(config_dir) / name) for name in names)
+    raise FileNotFoundError(f"父配置文件不存在: {parent_name} (tried {tried} and parent dirs)")
+
+
 def _resolve_inherit(config_data: dict, config_dir: str) -> dict:
     """解析配置继承链"""
     if "inherit" not in config_data:
         return config_data
 
     parent_name = config_data.pop("inherit")
-    parent_path = os.path.join(config_dir, f"{parent_name}.yaml")
-
-    if not os.path.exists(parent_path):
-        raise FileNotFoundError(f"父配置文件不存在: {parent_path}")
+    parent_path = _find_inherit_path(parent_name, config_dir)
 
     with open(parent_path, "r", encoding="utf-8") as f:
         parent_data = yaml.safe_load(f)
 
     # 递归解析父配置的继承
-    parent_data = _resolve_inherit(parent_data, config_dir)
+    parent_data = _resolve_inherit(parent_data, str(parent_path.parent))
 
     return _deep_merge(parent_data, config_data)
 
@@ -100,7 +118,7 @@ def parse_args_with_config() -> Config:
     """
     从命令行参数解析配置
 
-    用法: python script.py --config configs/sft_cot.yaml --training.learning_rate 1e-5
+    用法: python script.py --config configs/cot/sft_cot.yaml --training.learning_rate 1e-5
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="YAML 配置文件路径")

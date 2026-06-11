@@ -3,7 +3,7 @@
 # Smoke 结果优于 strict：direct 0.7358 (844/1147), missing answer tag 15。
 # 从 sft_cot/best 开始全量训练，输出到独立 checkpoint，不覆盖旧 GRPO。
 # ============================================================
-inherit: grpo
+inherit: ../cot/grpo
 
 reward:
   variant: "balanced"

@@ -2,7 +2,7 @@
 # CoT GRPO reward 修复 smoke: balanced
 # 从 sft_cot/best 开始，小步数验证温和兜底策略是否兼顾格式与正确性。
 # ============================================================
-inherit: grpo
+inherit: ../cot/grpo
 
 reward:
   variant: "balanced"
